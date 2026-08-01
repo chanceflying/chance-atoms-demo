@@ -3275,19 +3275,36 @@ export default function Studio({
               {!versionsLoading && !versions.length ? (
                 <span className="version-sidebar__empty">确认方案并完成构建后，将在这里生成 v1。</span>
               ) : null}
-              {versions.map((version, index) => (
-                <button
-                  className={version.id === activeVersion?.id ? "is-active" : ""}
-                  type="button"
-                  key={version.id}
-                  onClick={() => chooseVersion(version)}
-                  aria-current={version.id === activeVersion?.id ? "true" : undefined}
-                  disabled={accountSwitching || versionsLoading || Boolean(deletingProjectId)}
-                >
-                  <span><strong>v{version.ordinal}</strong><small>{index === 0 ? "当前版本" : "历史版本"}</small></span>
-                  <time dateTime={version.createdAt ?? undefined}>{formatRelativeDate(version.createdAt)}</time>
-                </button>
-              ))}
+              {versions.map((version, index) => {
+                const isSelectedVersion = version.id === activeVersion?.id;
+                const isBuildLocked = phase === "building" && !isSelectedVersion;
+                return (
+                  <div
+                    className={`version-sidebar__item${isBuildLocked ? " is-build-locked" : ""}`}
+                    data-tooltip={isBuildLocked ? "当前版本构建中，请完成后再切换" : undefined}
+                    key={version.id}
+                  >
+                    <button
+                      className={isSelectedVersion ? "is-active" : ""}
+                      type="button"
+                      onClick={() => chooseVersion(version)}
+                      aria-current={isSelectedVersion ? "true" : undefined}
+                      aria-label={isBuildLocked
+                        ? `v${version.ordinal}，当前版本构建中，请完成后再切换`
+                        : undefined}
+                      disabled={
+                        accountSwitching
+                        || versionsLoading
+                        || Boolean(deletingProjectId)
+                        || isBuildLocked
+                      }
+                    >
+                      <span><strong>v{version.ordinal}</strong><small>{index === 0 ? "当前版本" : "历史版本"}</small></span>
+                      <time dateTime={version.createdAt ?? undefined}>{formatRelativeDate(version.createdAt)}</time>
+                    </button>
+                  </div>
+                );
+              })}
             </div>
             {isHistoricalVersion ? (
               <button

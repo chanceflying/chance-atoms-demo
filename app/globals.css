@@ -5383,6 +5383,7 @@ select:focus-visible {
 }
 
 .version-sidebar__list button {
+  width: 100%;
   min-width: 0;
   min-height: 54px;
   display: grid;
@@ -5395,6 +5396,42 @@ select:focus-visible {
   background: transparent;
   color: #747971;
   text-align: left;
+}
+
+.version-sidebar__item {
+  position: relative;
+  min-width: 0;
+}
+
+.version-sidebar__item.is-build-locked button {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.version-sidebar__item.is-build-locked::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  z-index: 8;
+  top: 50%;
+  left: 50%;
+  width: max-content;
+  max-width: 190px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: #292c28;
+  color: #fff;
+  font-size: 9px;
+  line-height: 1.45;
+  text-align: center;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, -42%);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.version-sidebar__item.is-build-locked:hover::after {
+  opacity: 1;
+  transform: translate(-50%, -50%);
 }
 
 .version-sidebar__list button:hover:not(:disabled) {
