@@ -21,7 +21,8 @@ issue, or a pull request. Local `.env*` files are ignored by Git.
 
 ## GitHub sign-in
 
-Register a GitHub OAuth App with these production URLs:
+Register a separate production GitHub OAuth App using the actual deployed
+domain. The current demo uses:
 
 ```text
 Homepage URL:
@@ -51,14 +52,23 @@ Create and migrate D1 before the Worker can receive traffic:
 
 ```bash
 npx wrangler login
-npx wrangler d1 create chance-atoms-demo-db --binding DB --update-config
+npx wrangler d1 create chance-atoms-demo-db
+```
+
+Copy the returned `database_id` into the existing `d1_databases[0]` entry in
+`wrangler.jsonc`, keep its binding name as `DB`, and then run:
+
+```bash
 npm run db:migrate:remote
 npm run build:worker
 npm run deploy:worker
 ```
 
-Commit the `database_name` and `database_id` added to `wrangler.jsonc`; neither
-value is a secret. Keep the binding name as `DB`.
+Do not use `--update-config` while the checked-in config already contains a
+`DB` entry: it can append a second binding with the same name. Commit the
+updated `database_name` and `database_id`; neither value is a secret. If the
+fork changes the Worker name, update both `name` and
+`WORKER_SELF_REFERENCE.service` in `wrangler.jsonc`.
 
 After the first deployment, run CI and confirm lint, typecheck, tests, and the
 Cloudflare Worker build pass. Then configure the `production` environment and
@@ -66,7 +76,9 @@ use the manual workflow for later deployments.
 
 The workflow builds the complete Worker before applying migrations, then uploads
 that exact build. Disable the migration input only when migrations were applied
-separately. OpenAI secret sync is opt-in. Leaving the GitHub Actions
+separately. OpenAI secret sync is opt-in: select `sync_openai_secret` when
+manually running the workflow if the GitHub secret should be copied to the
+Worker. Leaving the GitHub Actions
 `OPENAI_API_KEY` secret empty does not remove a secret that already exists on
 Cloudflare; delete or rotate that secret explicitly in Cloudflare when needed.
 
