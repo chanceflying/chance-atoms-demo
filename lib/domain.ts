@@ -73,6 +73,27 @@ export interface WebAppArtifact {
   acceptanceCriteria: string[];
 }
 
+export interface BuildPlanStep {
+  title: string;
+  description: string;
+}
+
+/**
+ * A model-authored, user-reviewable plan for one Web App generation. This is
+ * an explicit build contract, not a representation of private chain-of-thought.
+ */
+export interface BuildPlan {
+  schemaVersion: 1;
+  kind: "web_app_plan";
+  title: string;
+  requestSummary: string;
+  designDecisions: string[];
+  interactionFlow: string[];
+  implementationSteps: BuildPlanStep[];
+  assumptions: string[];
+  acceptanceCriteria: string[];
+}
+
 /**
  * Existing AppSpec JSON is intentionally still a valid stored artifact, so D1
  * rows and exported CRUD projects need no data migration.
@@ -98,6 +119,8 @@ export interface Version {
   number: number;
   instruction: string | null;
   spec: StoredArtifact;
+  buildPlan: BuildPlan | null;
+  reasoningSummary: string[];
   createdAt: string;
 }
 

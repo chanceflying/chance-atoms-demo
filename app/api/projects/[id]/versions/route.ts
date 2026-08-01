@@ -19,6 +19,7 @@ import {
 } from "../../../../../db/serializers";
 import {
   isWebAppArtifact,
+  parseBuildPlan,
   parseRecordsForArtifact,
   parseStoredArtifact,
   type StoredArtifact,
@@ -41,6 +42,7 @@ export async function GET(request: Request, { params }: RouteContext) {
       .prepare(`
         SELECT v.id, v.project_id, v.version, v.instruction, v.spec,
                v.records, v.prompt, v.provider, v.model, v.warning, v.stages,
+               v.build_plan, v.reasoning_summary,
                v.created_at
         FROM versions AS v
         INNER JOIN projects AS p ON p.id = v.project_id
@@ -115,6 +117,12 @@ export async function POST(request: Request, { params }: RouteContext) {
     const provider = optionalString(payload, "provider", 80) ?? null;
     const model = optionalString(payload, "model", 120) ?? null;
     const warning = optionalString(payload, "warning", 2_000) ?? null;
+    const buildPlan = Object.hasOwn(payload, "buildPlan")
+      ? jsonText(validBuildPlan(payload.buildPlan), {})
+      : null;
+    const reasoningSummary = Object.hasOwn(payload, "reasoningSummary")
+      ? jsonText(validReasoningSummary(payload.reasoningSummary), [])
+      : null;
     const stages = jsonText(payload.stages, []);
     const versionId = crypto.randomUUID();
     const now = new Date().toISOString();
@@ -123,14 +131,17 @@ export async function POST(request: Request, { params }: RouteContext) {
         .prepare(`
           INSERT INTO versions (
             id, project_id, version, instruction, spec, records, prompt,
-            provider, model, warning, stages, created_at
+            provider, model, warning, build_plan, reasoning_summary, stages,
+            created_at
           )
           SELECT ?, id, current_version + 1, ?, COALESCE(?, current_spec),
-                 COALESCE(?, records), COALESCE(?, prompt), ?, ?, ?, ?, ?
+                 COALESCE(?, records), COALESCE(?, prompt), ?, ?, ?,
+                 COALESCE(?, '{}'), COALESCE(?, '[]'), ?, ?
           FROM projects
           WHERE id = ? AND workspace_id = ?
           RETURNING id, project_id, version, instruction, spec, records, prompt,
-                    provider, model, warning, stages, created_at
+                    provider, model, warning, build_plan, reasoning_summary,
+                    stages, created_at
         `)
         .bind(
           versionId,
@@ -141,6 +152,8 @@ export async function POST(request: Request, { params }: RouteContext) {
           provider,
           model,
           warning,
+          buildPlan,
+          reasoningSummary,
           stages,
           now,
           id,
@@ -280,6 +293,26 @@ function validRecordsForArtifact(value: unknown, artifact: StoredArtifact) {
   }
 }
 
+function validBuildPlan(value: unknown) {
+  try {
+    return parseBuildPlan(value);
+  } catch {
+    throw new RequestError(400, "buildPlan must be a valid Web App build plan");
+  }
+}
+
+function validReasoningSummary(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 8) {
+    throw new RequestError(400, "reasoningSummary must be a short string array");
+  }
+  return value.map((item) => {
+    if (typeof item !== "string" || !item.trim() || item.length > 2_000) {
+      throw new RequestError(400, "reasoningSummary contains an invalid item");
+    }
+    return item.trim();
+  });
+}
+
 async function rollbackVersion(
   workspace: Workspace,
   projectId: string,
@@ -294,7 +327,7 @@ async function rollbackVersion(
   const source = await db
     .prepare(`
       SELECT v.version, v.spec, v.records, v.prompt, v.provider,
-             v.model, v.warning, v.stages
+             v.model, v.warning, v.build_plan, v.reasoning_summary, v.stages
       FROM versions AS v
       INNER JOIN projects AS p ON p.id = v.project_id
       WHERE v.id = ? AND v.project_id = ? AND p.workspace_id = ?
@@ -322,13 +355,15 @@ async function rollbackVersion(
       .prepare(`
         INSERT INTO versions (
           id, project_id, version, instruction, spec, records, prompt,
-          provider, model, warning, stages, created_at
+          provider, model, warning, build_plan, reasoning_summary, stages,
+          created_at
         )
-        SELECT ?, id, current_version + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        SELECT ?, id, current_version + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         FROM projects
         WHERE id = ? AND workspace_id = ?
         RETURNING id, project_id, version, instruction, spec, records, prompt,
-                  provider, model, warning, stages, created_at
+                  provider, model, warning, build_plan, reasoning_summary,
+                  stages, created_at
       `)
       .bind(
         versionId,
@@ -339,6 +374,8 @@ async function rollbackVersion(
         source.provider,
         source.model,
         source.warning,
+        source.build_plan,
+        source.reasoning_summary,
         source.stages,
         now,
         projectId,

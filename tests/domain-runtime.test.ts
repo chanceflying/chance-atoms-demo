@@ -3,20 +3,25 @@ import test from "node:test";
 
 import {
   AppSpecValidationError,
+  BuildPlanValidationError,
   StoredArtifactValidationError,
   compileAppToHtml,
   deterministicAgent,
+  isBuildPlan,
   isWebAppArtifact,
+  parseBuildPlan,
   parseAppSpec,
   parseRecordsForArtifact,
   parseStoredArtifact,
   reconcileRecordsForSpec,
   validateAppSpec,
+  validateBuildPlan,
   validateProject,
   validateRecords,
   validateStoredArtifact,
   validateVersion,
   type AppSpec,
+  type BuildPlan,
   type WebAppArtifact,
 } from "../lib/index";
 import { serializeProject, serializeVersion } from "../db/serializers";
@@ -195,6 +200,78 @@ test("stored artifacts accept legacy AppSpec and self-contained web apps", () =>
   );
 });
 
+test("build plans validate and parse a model-authored Web App plan", () => {
+  const plan: BuildPlan = {
+    schemaVersion: 1,
+    kind: "web_app_plan",
+    title: "Build a playable Tetris game",
+    requestSummary: "Create a self-contained browser game with keyboard controls.",
+    designDecisions: [
+      "Use a canvas for deterministic board rendering.",
+      "Keep all game state inside the generated document.",
+    ],
+    interactionFlow: [
+      "The player starts a new game.",
+      "Keyboard input moves and rotates the active piece.",
+    ],
+    implementationSteps: [
+      {
+        title: "Create the game model",
+        description: "Represent the board, active piece, collision, and line clearing.",
+      },
+      {
+        title: "Build the interaction loop",
+        description: "Connect rendering, timed drops, keyboard input, and restart.",
+      },
+    ],
+    assumptions: ["The generated app does not persist an in-progress game."],
+    acceptanceCriteria: [
+      "A player can move and rotate pieces.",
+      "Completed lines are removed and scored.",
+    ],
+  };
+
+  assert.deepEqual(parseBuildPlan(plan), plan);
+  assert.equal(validateBuildPlan(plan).success, true);
+  assert.equal(isBuildPlan(plan), true);
+  assert.equal(isWebAppArtifact(plan), false);
+});
+
+test("build plan validation rejects malformed structure and bounded content", () => {
+  const malformed = {
+    schemaVersion: 2,
+    kind: "web_app",
+    title: " ",
+    requestSummary: "x".repeat(1_201),
+    designDecisions: [],
+    interactionFlow: Array.from({ length: 17 }, (_, index) => `Flow ${index}`),
+    implementationSteps: [
+      { title: "Valid title" },
+      ...Array.from({ length: 12 }, () => ({ title: "Step", description: "Do it" })),
+    ],
+    assumptions: "none",
+    acceptanceCriteria: [],
+  };
+  const result = validateBuildPlan(malformed);
+
+  assert.equal(result.success, false);
+  assert.equal(isBuildPlan(malformed), false);
+  if (!result.success) {
+    const paths = result.issues.map((entry) => entry.path);
+    assert.ok(paths.includes("schemaVersion"));
+    assert.ok(paths.includes("kind"));
+    assert.ok(paths.includes("title"));
+    assert.ok(paths.includes("requestSummary"));
+    assert.ok(paths.includes("designDecisions"));
+    assert.ok(paths.includes("interactionFlow"));
+    assert.ok(paths.includes("implementationSteps"));
+    assert.ok(paths.includes("implementationSteps[0].description"));
+    assert.ok(paths.includes("assumptions"));
+    assert.ok(paths.includes("acceptanceCriteria"));
+  }
+  assert.throws(() => parseBuildPlan(malformed), BuildPlanValidationError);
+});
+
 test("database serializers expose artifact aliases and clear web app records", () => {
   const artifact: WebAppArtifact = {
     schemaVersion: 1,
@@ -203,6 +280,17 @@ test("database serializers expose artifact aliases and clear web app records", (
     description: "A playable snake game",
     html: "<!doctype html><title>Snake</title>",
     acceptanceCriteria: ["The game starts"],
+  };
+  const buildPlan: BuildPlan = {
+    schemaVersion: 1,
+    kind: "web_app_plan",
+    title: "Plan Snake",
+    requestSummary: "Create a playable snake game.",
+    designDecisions: ["Use canvas rendering."],
+    interactionFlow: ["Start and move the snake."],
+    implementationSteps: [{ title: "Build game", description: "Implement the loop." }],
+    assumptions: [],
+    acceptanceCriteria: ["The snake can move."],
   };
   const stored = JSON.stringify(artifact);
   const row = {
@@ -220,6 +308,8 @@ test("database serializers expose artifact aliases and clear web app records", (
     provider: "openai",
     model: "test-model",
     warning: null,
+    build_plan: JSON.stringify(buildPlan),
+    reasoning_summary: JSON.stringify(["Canvas keeps the game loop compact."]),
     stages: "[]",
     created_at: "2026-08-01T08:00:00.000Z",
     updated_at: "2026-08-01T08:00:00.000Z",
@@ -233,6 +323,8 @@ test("database serializers expose artifact aliases and clear web app records", (
   assert.deepEqual(version.artifact, artifact);
   assert.deepEqual(version.spec, artifact);
   assert.deepEqual(version.records, []);
+  assert.deepEqual(version.buildPlan, buildPlan);
+  assert.deepEqual(version.reasoningSummary, ["Canvas keeps the game loop compact."]);
 });
 
 test("compiler emits a complete, sandbox-friendly CRUD application", () => {

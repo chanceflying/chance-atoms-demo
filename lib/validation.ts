@@ -3,6 +3,8 @@ import {
   type AppRecord,
   type AppSpec,
   type AppValue,
+  type BuildPlan,
+  type BuildPlanStep,
   type FieldSpec,
   type FieldType,
   type Project,
@@ -53,6 +55,20 @@ export class StoredArtifactValidationError extends Error {
         .join("; ")}`,
     );
     this.name = "StoredArtifactValidationError";
+    this.issues = issues;
+  }
+}
+
+export class BuildPlanValidationError extends Error {
+  readonly issues: ValidationIssue[];
+
+  constructor(issues: ValidationIssue[]) {
+    super(
+      `Invalid BuildPlan: ${issues
+        .map((entry) => `${entry.path}: ${entry.message}`)
+        .join("; ")}`,
+    );
+    this.name = "BuildPlanValidationError";
     this.issues = issues;
   }
 }
@@ -122,6 +138,36 @@ function stringArray(
   return value.slice(0, max).map((item, index) =>
     stringValue(item, `${path}[${index}]`, issues, { max: itemMax }),
   );
+}
+
+function buildPlanSteps(
+  value: unknown,
+  path: string,
+  issues: ValidationIssue[],
+): BuildPlanStep[] {
+  if (!Array.isArray(value)) {
+    issue(issues, path, "must be an array");
+    return [];
+  }
+  if (value.length < 1) issue(issues, path, "must contain at least 1 item(s)");
+  if (value.length > 12) issue(issues, path, "must contain at most 12 items");
+
+  return value.slice(0, 12).map((entry, index) => {
+    const stepPath = `${path}[${index}]`;
+    if (!isObject(entry)) {
+      issue(issues, stepPath, "must be an object");
+      return { title: "Invalid step", description: "Invalid step" };
+    }
+    return {
+      title: stringValue(entry.title, `${stepPath}.title`, issues, { max: 120 }),
+      description: stringValue(
+        entry.description,
+        `${stepPath}.description`,
+        issues,
+        { max: 600 },
+      ),
+    };
+  });
 }
 
 function validateField(
@@ -376,6 +422,70 @@ export function isAppSpec(input: unknown): input is AppSpec {
   return validateAppSpec(input).success;
 }
 
+export function validateBuildPlan(input: unknown): ValidationResult<BuildPlan> {
+  const issues: ValidationIssue[] = [];
+  if (!isObject(input)) {
+    return { success: false, issues: [{ path: "$", message: "must be an object" }] };
+  }
+
+  if (input.schemaVersion !== 1) {
+    issue(issues, "schemaVersion", "must equal 1");
+  }
+  if (input.kind !== "web_app_plan") {
+    issue(issues, "kind", "must equal web_app_plan");
+  }
+
+  const plan: BuildPlan = {
+    schemaVersion: 1,
+    kind: "web_app_plan",
+    title: stringValue(input.title, "title", issues, { max: 100 }),
+    requestSummary: stringValue(input.requestSummary, "requestSummary", issues, {
+      max: 1_200,
+    }),
+    designDecisions: stringArray(
+      input.designDecisions,
+      "designDecisions",
+      issues,
+      { min: 1, max: 12, itemMax: 500 },
+    ),
+    interactionFlow: stringArray(
+      input.interactionFlow,
+      "interactionFlow",
+      issues,
+      { min: 1, max: 16, itemMax: 300 },
+    ),
+    implementationSteps: buildPlanSteps(
+      input.implementationSteps,
+      "implementationSteps",
+      issues,
+    ),
+    assumptions: stringArray(input.assumptions, "assumptions", issues, {
+      max: 12,
+      itemMax: 400,
+    }),
+    acceptanceCriteria: stringArray(
+      input.acceptanceCriteria,
+      "acceptanceCriteria",
+      issues,
+      { min: 1, max: 16, itemMax: 400 },
+    ),
+  };
+
+  return issues.length > 0
+    ? { success: false, issues }
+    : { success: true, data: plan };
+}
+
+export function parseBuildPlan(input: unknown): BuildPlan {
+  const result = validateBuildPlan(input);
+  if (!result.success) throw new BuildPlanValidationError(result.issues);
+  return result.data;
+}
+
+export function isBuildPlan(input: unknown): input is BuildPlan {
+  return validateBuildPlan(input).success;
+}
+
 export function validateWebAppArtifact(
   input: unknown,
 ): ValidationResult<WebAppArtifact> {
@@ -568,6 +678,20 @@ export function validateVersion(input: unknown): ValidationResult<Version> {
       issue(issues, `spec.${artifactIssue.path}`, artifactIssue.message);
     }
   }
+  const buildPlanResult = input.buildPlan === undefined || input.buildPlan === null
+    ? null
+    : validateBuildPlan(input.buildPlan);
+  if (buildPlanResult && !buildPlanResult.success) {
+    for (const planIssue of buildPlanResult.issues) {
+      issue(issues, `buildPlan.${planIssue.path}`, planIssue.message);
+    }
+  }
+  const reasoningSummary = input.reasoningSummary === undefined
+    ? []
+    : stringArray(input.reasoningSummary, "reasoningSummary", issues, {
+        max: 8,
+        itemMax: 2_000,
+      });
   const createdAt = stringValue(input.createdAt, "createdAt", issues, { max: 40 });
   if (Number.isNaN(Date.parse(createdAt))) issue(issues, "createdAt", "must be an ISO date string");
   const version: Version = {
@@ -576,6 +700,8 @@ export function validateVersion(input: unknown): ValidationResult<Version> {
     number: typeof number === "number" ? number : 1,
     instruction: nullableString(input.instruction, "instruction", issues, 2_000),
     spec: artifactResult.success ? artifactResult.data : (input.spec as StoredArtifact),
+    buildPlan: buildPlanResult?.success ? buildPlanResult.data : null,
+    reasoningSummary,
     createdAt,
   };
   return issues.length > 0 ? { success: false, issues } : { success: true, data: version };

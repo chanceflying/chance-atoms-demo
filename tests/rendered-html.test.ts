@@ -6,17 +6,19 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import Studio from "../app/components/Studio";
 
-test("server-renders the Forge product shell", () => {
+test("server-renders the single Web App product shell", () => {
   const html = renderToStaticMarkup(createElement(Studio));
 
   assert.match(html, /从一句话到可运行工具/);
-  assert.match(html, /描述你的工作场景/);
+  assert.match(html, /描述你想创建的应用/);
   assert.match(html, /生成计划/);
-  assert.match(html, /客户线索看板/);
-  assert.match(html, /内容发布日历/);
-  assert.match(html, /设备巡检台/);
+  assert.match(html, /BuildPlan/);
+  assert.match(html, /霓虹贪吃蛇/);
+  assert.match(html, /俄罗斯方块/);
+  assert.match(html, /扫雷挑战/);
   assert.match(html, /最近项目/);
   assert.match(html, /class="forge-home"/);
+  assert.doesNotMatch(html, /客户线索看板|内容发布日历|设备巡检台/);
   assert.doesNotMatch(html, /Your site is taking shape|react-loading-skeleton/);
 });
 

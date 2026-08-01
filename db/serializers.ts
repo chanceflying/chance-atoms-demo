@@ -1,5 +1,5 @@
 import { parseStoredJson } from "./http";
-import { isWebAppArtifact } from "../lib/validation";
+import { isBuildPlan, isWebAppArtifact } from "../lib/validation";
 
 export type DatabaseRow = Record<string, unknown>;
 
@@ -25,6 +25,8 @@ export function serializeProject(row: DatabaseRow) {
 
 export function serializeVersion(row: DatabaseRow) {
   const artifact = parseStoredJson(row.spec, {});
+  const rawBuildPlan = parseStoredJson(row.build_plan, null);
+  const rawReasoningSummary = parseStoredJson(row.reasoning_summary, []);
   return {
     id: row.id,
     versionId: row.id,
@@ -38,6 +40,10 @@ export function serializeVersion(row: DatabaseRow) {
     provider: row.provider,
     model: row.model,
     warning: row.warning,
+    buildPlan: isBuildPlan(rawBuildPlan) ? rawBuildPlan : null,
+    reasoningSummary: Array.isArray(rawReasoningSummary)
+      ? rawReasoningSummary.filter((item): item is string => typeof item === "string")
+      : [],
     stages: parseStoredJson(row.stages, []),
     createdAt: row.created_at,
   };

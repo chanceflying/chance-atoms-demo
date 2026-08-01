@@ -546,89 +546,38 @@ select:focus-visible {
   color: #a2a49e;
 }
 
-.artifact-mode {
+.model-route {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 14px;
   padding: 0 20px 14px;
   color: #74766f;
   font-size: 10px;
 }
 
-.artifact-mode > span {
+.model-route > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   font-family: var(--mono);
-  font-size: 8px;
+  font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
-.artifact-mode__options {
-  display: inline-flex;
-  gap: 3px;
-  padding: 3px;
-  border: 1px solid #d7d4ce;
-  border-radius: 9px;
-  background: #f4f2ed;
-}
-
-.artifact-mode__options button {
-  padding: 6px 10px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: #72746d;
-  font-size: 10px;
-  font-weight: 650;
-  cursor: pointer;
-}
-
-.artifact-mode__options button.is-active {
-  background: var(--ink);
-  color: #fff;
-  box-shadow: 0 2px 7px rgba(23, 24, 22, 0.16);
-}
-
-.artifact-mode__options button:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.artifact-mode__provider {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-left: auto;
+.model-route small {
   color: #858780;
   font-size: 9px;
 }
 
-.artifact-mode__provider i {
+.model-route i {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #a6a8a1;
-}
-
-.artifact-mode__provider--checking i {
-  background: #d49c22;
-  animation: pulse 0.9s infinite;
-}
-
-.artifact-mode__provider--available {
-  color: #438437;
-}
-
-.artifact-mode__provider--available i {
   background: #5aab48;
-}
-
-.artifact-mode__provider--unavailable {
-  color: #b24848;
-}
-
-.artifact-mode__provider--unavailable i {
-  background: #d65252;
+  box-shadow: 0 0 0 3px rgba(90, 171, 72, 0.12);
 }
 
 .prompt-composer__footer {
@@ -1455,6 +1404,7 @@ select:focus-visible {
 }
 
 .build-plan,
+.planning-card,
 .building-card,
 .build-summary {
   margin: 22px 0 4px 39px;
@@ -1466,6 +1416,43 @@ select:focus-visible {
 
 .build-plan {
   overflow: hidden;
+}
+
+.planning-card {
+  display: grid;
+  grid-template-columns: 42px 1fr auto;
+  align-items: center;
+  gap: 13px;
+  padding: 18px;
+}
+
+.planning-card__spinner {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--ink);
+  color: var(--acid);
+  animation: pulse 1.1s infinite;
+}
+
+.planning-card h2 {
+  margin: 2px 0 4px;
+  font-size: 14px;
+}
+
+.planning-card p {
+  margin: 0;
+  color: #777971;
+  font-size: 8px;
+  line-height: 1.55;
+}
+
+.planning-card .forge-button {
+  min-height: 34px;
+  padding-inline: 12px;
+  font-size: 8px;
 }
 
 .build-plan__header {
@@ -1500,6 +1487,89 @@ select:focus-visible {
   color: #565852;
   font-size: 9px;
   line-height: 1.6;
+}
+
+.build-plan__reasoning {
+  margin: 0 17px 14px;
+  padding: 11px;
+  border: 1px solid #dedbd4;
+  border-radius: 8px;
+  background: #fbfaf7;
+}
+
+.build-plan__reasoning strong,
+.plan-overview h3,
+.plan-section-heading h3,
+.plan-details h3 {
+  margin: 0;
+  font-size: 9px;
+}
+
+.build-plan__reasoning p,
+.build-plan__reasoning ul {
+  margin: 5px 0 0;
+  color: #6f716b;
+  font-size: 8px;
+  line-height: 1.65;
+}
+
+.build-plan__reasoning ul {
+  display: grid;
+  gap: 4px;
+  padding-left: 16px;
+}
+
+.plan-overview,
+.plan-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 17px 14px;
+}
+
+.plan-overview section,
+.plan-details section {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e2dfd8;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.plan-overview ul,
+.plan-overview ol,
+.plan-details ul {
+  display: grid;
+  gap: 5px;
+  margin: 7px 0 0;
+  padding-left: 16px;
+  color: #72746d;
+  font-size: 8px;
+  line-height: 1.5;
+}
+
+.plan-details p {
+  margin: 7px 0 0;
+  color: #8a8c85;
+  font-size: 8px;
+}
+
+.plan-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 17px 7px;
+}
+
+.plan-section-heading small {
+  max-width: 55%;
+  overflow: hidden;
+  color: #8a8c85;
+  font-family: var(--mono);
+  font-size: 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .plan-steps {
@@ -1637,27 +1707,33 @@ select:focus-visible {
   font-size: 9px;
 }
 
-.building-progress {
+.building-log {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 5px;
-  margin: 0;
+  gap: 7px;
+  max-width: 340px;
+  margin: 0 auto;
   padding: 0;
   list-style: none;
+  text-align: left;
 }
 
-.building-progress li {
-  display: grid;
-  justify-items: center;
-  gap: 5px;
-  color: #a2a49d;
-  font-size: 7px;
+.building-log li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #e2dfd8;
+  border-radius: 8px;
+  background: #faf9f5;
+  color: #777971;
+  font-size: 8px;
 }
 
-.building-progress li span {
+.building-log li span {
   width: 20px;
   height: 20px;
   display: grid;
+  flex: 0 0 auto;
   place-items: center;
   border: 1px solid #d4d1ca;
   border-radius: 50%;
@@ -1665,19 +1741,19 @@ select:focus-visible {
   font-family: var(--mono);
 }
 
-.building-progress li.is-active,
-.building-progress li.is-done {
+.building-log li.is-active,
+.building-log li.is-done {
   color: var(--ink);
 }
 
-.building-progress li.is-active span {
+.building-log li.is-active span {
   border-color: var(--blue);
   background: var(--blue);
   color: #fff;
   animation: pulse 0.9s infinite;
 }
 
-.building-progress li.is-done span {
+.building-log li.is-done span {
   border-color: #72bd5c;
   background: #e7f7df;
   color: #4e963d;
@@ -2339,15 +2415,11 @@ select:focus-visible {
     padding: 12px;
   }
 
-  .artifact-mode {
+  .model-route {
     align-items: flex-start;
-    flex-wrap: wrap;
+    flex-direction: column;
+    gap: 5px;
     padding-inline: 12px;
-  }
-
-  .artifact-mode__provider {
-    width: 100%;
-    margin-left: 0;
   }
 
   .prompt-composer__hint {
@@ -2482,9 +2554,17 @@ select:focus-visible {
     display: none;
   }
 
-  .building-progress {
-    grid-template-columns: repeat(2, 1fr);
-    row-gap: 12px;
+  .planning-card {
+    grid-template-columns: 42px 1fr;
+  }
+
+  .planning-card .forge-button {
+    grid-column: 1 / -1;
+  }
+
+  .plan-overview,
+  .plan-details {
+    grid-template-columns: 1fr;
   }
 
   .build-summary__stats {

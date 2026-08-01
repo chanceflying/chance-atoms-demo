@@ -13,20 +13,17 @@ import {
 import {
   isWebAppArtifact,
   parseStoredArtifact,
+  type BuildPlan,
   type StoredArtifact,
   type WebAppArtifact,
 } from "@/lib";
 import type { AppRecord } from "@/lib/app-spec";
 import { compileAppToHtml } from "@/lib/generator";
-import { reconcileRecordsForSpec } from "@/lib/reconcile-records";
 
 type StudioPhase = "home" | "planning" | "building" | "ready";
 type InspectorTab = "preview" | "code" | "spec";
 type PreviewSize = "desktop" | "mobile";
-type PersistStatus = "idle" | "saving" | "saved" | "error";
-type RetryAction = "projects" | "versions" | "build" | "rollback" | null;
-type ArtifactKind = "data_app" | "web_app";
-type BridgeStatus = "idle" | "checking" | "available" | "unavailable";
+type RetryAction = "projects" | "versions" | "plan" | "build" | "rollback" | null;
 
 type ProjectItem = {
   id: string;
@@ -50,27 +47,16 @@ type VersionItem = {
   model: string | null;
   warning: string | null;
   stages: string[];
+  buildPlan: BuildPlan | null;
+  reasoningSummary: string[];
   createdAt: string | null;
 };
 
 type PendingBuild = {
   kind: "new" | "refine";
-  artifactKind: ArtifactKind;
   prompt: string;
   instruction?: string;
   previousArtifact?: StoredArtifact;
-  projectId?: string;
-};
-
-type PendingPersistence = {
-  records: AppRecord[];
-  projectId: string;
-  versionId: string;
-};
-
-type PlanStep = {
-  title: string;
-  detail: string;
 };
 
 type ConversationMessage = {
@@ -88,6 +74,13 @@ type GenerateResponse = {
   stages: string[];
 };
 
+type PlanResponse = {
+  plan: BuildPlan;
+  reasoningSummary: string[];
+  provider: string | null;
+  model: string | null;
+};
+
 type SessionUser = {
   id: string;
   login: string;
@@ -102,42 +95,33 @@ type Notice = {
 
 const STARTERS = [
   {
-    eyebrow: "销售 · CRM",
-    title: "客户线索看板",
-    description: "收集客户、标记跟进阶段，并按负责人快速筛选。",
+    eyebrow: "经典 · 街机",
+    title: "霓虹贪吃蛇",
+    description: "键盘和触屏都能玩的贪吃蛇，包含计分、暂停与重开。",
     prompt:
-      "做一个客户线索管理工具，包含客户名称、联系人、手机号、意向产品、跟进阶段和负责人，支持按跟进阶段筛选，并提供 4 条示例数据。",
+      "构造一个霓虹风格的贪吃蛇前端应用，支持方向键和 WASD 操作，也提供移动端方向按钮，包含食物、增长、计分、暂停、碰撞失败和重新开始。",
     accent: "violet",
   },
   {
-    eyebrow: "内容 · 协作",
-    title: "内容发布日历",
-    description: "管理选题、渠道和发布时间，清楚看到制作进度。",
+    eyebrow: "经典 · 方块",
+    title: "俄罗斯方块",
+    description: "可以移动、旋转、消行和计分的完整小游戏。",
     prompt:
-      "做一个内容发布计划工具，包含选题、发布渠道、负责人、计划日期和制作状态，支持按制作状态筛选，并提供 5 条示例数据。",
+      "构造一个复古像素风俄罗斯方块前端应用，支持键盘移动、旋转和快速下落，展示下一个方块、分数、等级，包含暂停、消行和重新开始。",
     accent: "cyan",
   },
   {
-    eyebrow: "运营 · 巡检",
-    title: "设备巡检台",
-    description: "登记巡检结果、风险等级与处理状态，减少遗漏。",
+    eyebrow: "经典 · 益智",
+    title: "扫雷挑战",
+    description: "支持难度、计时、插旗和胜负判定的扫雷游戏。",
     prompt:
-      "做一个设备巡检记录工具，包含设备名称、区域、巡检人、巡检日期、风险等级、处理状态和备注，支持按处理状态筛选，并提供 4 条示例数据。",
+      "构造一个简洁的扫雷前端应用，支持初级和中级难度、计时、剩余雷数、左键翻开、右键插旗、首次点击安全、胜负判定和重新开始。",
     accent: "amber",
   },
 ] as const;
 
-const BUILDING_STAGES = [
-  "理解业务目标",
-  "设计数据结构",
-  "组装页面与交互",
-  "准备可运行预览",
-];
-
 const LOCAL_CODEX_BRIDGE = "http://127.0.0.1:4317";
 const LOCAL_BRIDGE_TIMEOUT_MS = 1_200;
-const WEB_APP_PROMPT =
-  /(贪吃蛇|小游戏|游戏|game|snake|计算器|calculator|计时器|timer|时钟|clock|落地页|landing\s*page|互动网页|interactive\s+(?:page|app))/i;
 
 class ResponseError extends Error {
   constructor(
@@ -190,6 +174,76 @@ function parseArtifact(value: unknown): StoredArtifact | null {
 function parseRecords(value: unknown): AppRecord[] {
   const parsed = parseJson(value);
   return Array.isArray(parsed) ? (parsed as AppRecord[]) : [];
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    : [];
+}
+
+function readReasoningSummary(value: unknown): string[] {
+  const parsed = parseJson(value);
+  if (typeof parsed === "string") {
+    const summary = parsed.trim();
+    return summary ? [summary] : [];
+  }
+  return readStringArray(parsed);
+}
+
+function parseBuildPlan(value: unknown): BuildPlan | null {
+  const parsed = parseJson(value);
+  if (!isRecord(parsed)) return null;
+  if (readNumber(parsed.schemaVersion, 0) !== 1 || parsed.kind !== "web_app_plan") {
+    return null;
+  }
+
+  const title = readString(parsed.title).trim();
+  const requestSummary = readString(parsed.requestSummary).trim();
+  const implementationSteps = Array.isArray(parsed.implementationSteps)
+    ? parsed.implementationSteps
+        .map((item) => {
+          if (!isRecord(item)) return null;
+          const stepTitle = readString(item.title).trim();
+          const description = readString(item.description).trim();
+          return stepTitle && description ? { title: stepTitle, description } : null;
+        })
+        .filter(
+          (item): item is { title: string; description: string } => Boolean(item),
+        )
+    : [];
+
+  if (!title || !requestSummary || !implementationSteps.length) return null;
+  return {
+    schemaVersion: 1,
+    kind: "web_app_plan",
+    title,
+    requestSummary,
+    designDecisions: readStringArray(parsed.designDecisions),
+    interactionFlow: readStringArray(parsed.interactionFlow),
+    implementationSteps,
+    assumptions: readStringArray(parsed.assumptions),
+    acceptanceCriteria: readStringArray(parsed.acceptanceCriteria),
+  };
+}
+
+function parsePlanResponse(payload: unknown): PlanResponse {
+  if (!isRecord(payload)) {
+    throw new Error("规划服务没有返回有效结果，请重试。 ");
+  }
+  const plan = parseBuildPlan(payload.plan);
+  if (!plan) {
+    throw new Error("规划结果不符合 Web App BuildPlan 契约，请重试。 ");
+  }
+  return {
+    plan,
+    reasoningSummary: readReasoningSummary(payload.reasoningSummary),
+    provider: readNullableString(payload.provider),
+    model: readNullableString(payload.model),
+  };
 }
 
 function unwrapObject(payload: unknown, keys: string[]): Record<string, unknown> | null {
@@ -274,6 +328,12 @@ function normalizeVersion(
     stages: Array.isArray(stagesValue)
       ? stagesValue.filter((item): item is string => typeof item === "string")
       : [],
+    buildPlan: parseBuildPlan(
+      row.buildPlan ?? row.build_plan ?? row.buildPlanJson ?? row.build_plan_json,
+    ),
+    reasoningSummary: readReasoningSummary(
+      row.reasoningSummary ?? row.reasoning_summary,
+    ),
     createdAt: readNullableString(row.createdAt ?? row.created_at),
   };
 }
@@ -298,12 +358,6 @@ function getArtifactDescription(artifact: StoredArtifact): string {
   return readString(row.description ?? row.subtitle);
 }
 
-function getArtifactSeedData(artifact: StoredArtifact): AppRecord[] {
-  if (isWebAppArtifact(artifact)) return [];
-  const row = artifact as unknown as Record<string, unknown>;
-  return parseRecords(row.seedData ?? row.seed_data);
-}
-
 function deriveProjectName(prompt: string, artifact?: StoredArtifact): string {
   if (artifact) {
     const artifactTitle = getArtifactTitle(artifact, "");
@@ -316,56 +370,11 @@ function deriveProjectName(prompt: string, artifact?: StoredArtifact): string {
   return (clean.split(/\s+/).slice(0, 5).join(" ") || "我的新应用").slice(0, 32);
 }
 
-function makePlan(build: PendingBuild): PlanStep[] {
-  if (build.artifactKind === "web_app") {
-    return [
-      {
-        title: "梳理玩法与目标",
-        detail: "确认核心交互、完成条件和用户操作路径。",
-      },
-      {
-        title: "设计页面与状态",
-        detail: "组织视觉层级、组件状态和桌面与移动端布局。",
-      },
-      {
-        title: "实现完整交互",
-        detail: "由代码生成模型编写可独立运行的 HTML、CSS 与 JavaScript。",
-      },
-      {
-        title: "检查并准备预览",
-        detail: "验证启动、主要交互和导出文件，随后装入安全预览。",
-      },
-    ];
-  }
-  const focus = build.kind === "new" ? "建立应用骨架" : "保留现有能力并增量调整";
-  return [
-    {
-      title: "梳理目标与信息",
-      detail: `${focus}，从描述中识别核心对象、字段与必填项。`,
-    },
-    {
-      title: "组织数据与视图",
-      detail: "生成清晰的列表、录入表单和适合当前场景的筛选方式。",
-    },
-    {
-      title: "连接真实交互",
-      detail: "让新增、编辑、删除和筛选可以直接操作，并持久保存记录。",
-    },
-    {
-      title: "生成并检查预览",
-      detail: "装入示例数据，完成桌面与移动尺寸下的可运行预览。",
-    },
-  ];
-}
-
-function inferredArtifactKind(prompt: string): ArtifactKind {
-  return WEB_APP_PROMPT.test(prompt) ? "web_app" : "data_app";
-}
-
 function providerLabel(provider: string | null): string {
   if (provider === "codex_session") return "本机 Codex";
   if (provider === "openai") return "OpenAI";
-  return "本地规则";
+  if (provider === "local") return "本地服务";
+  return provider || "模型服务";
 }
 
 function makeId(prefix: string): string {
@@ -426,7 +435,38 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
-async function generateWithLocalCodex(build: PendingBuild): Promise<GenerateResponse> {
+async function planWithLocalCodex(build: PendingBuild): Promise<PlanResponse> {
+  const response = await fetch(`${LOCAL_CODEX_BRIDGE}/plan`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    mode: "cors",
+    body: JSON.stringify({
+      prompt: build.prompt,
+      ...(build.instruction ? { instruction: build.instruction } : {}),
+      ...(build.previousArtifact
+        ? { previousArtifact: build.previousArtifact }
+        : {}),
+    }),
+  });
+  const payload = await readResponse(response);
+  if (!response.ok) {
+    const message = isRecord(payload)
+      ? readString(payload.error ?? payload.message, "本机 Codex 规划失败。")
+      : "本机 Codex 规划失败。";
+    throw new Error(message);
+  }
+  const result = parsePlanResponse(payload);
+  return {
+    ...result,
+    provider: result.provider ?? "codex_session",
+    model: result.model ?? "Codex subscription",
+  };
+}
+
+async function generateWithLocalCodex(
+  build: PendingBuild,
+  plan: BuildPlan,
+): Promise<GenerateResponse> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), LOCAL_BRIDGE_TIMEOUT_MS);
 
@@ -459,7 +499,10 @@ async function generateWithLocalCodex(build: PendingBuild): Promise<GenerateResp
     body: JSON.stringify({
       prompt: build.prompt,
       ...(build.instruction ? { instruction: build.instruction } : {}),
-      previousArtifact: build.previousArtifact ?? null,
+      ...(build.previousArtifact
+        ? { previousArtifact: build.previousArtifact }
+        : {}),
+      plan,
     }),
   });
   const payload = await readResponse(response);
@@ -486,7 +529,7 @@ async function generateWithLocalCodex(build: PendingBuild): Promise<GenerateResp
     warning: isRecord(payload) ? readNullableString(payload.warning) : null,
     stages: isRecord(payload) && Array.isArray(payload.stages)
       ? payload.stages.filter((item): item is string => typeof item === "string")
-      : ["本机 Codex 生成", "结构校验", "准备预览"],
+      : [],
   };
 }
 
@@ -508,9 +551,6 @@ function safeCompile(
 export default function Studio() {
   const [phase, setPhase] = useState<StudioPhase>("home");
   const [prompt, setPrompt] = useState("");
-  const [artifactKind, setArtifactKind] = useState<ArtifactKind>("data_app");
-  const [artifactKindManuallySelected, setArtifactKindManuallySelected] = useState(false);
-  const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>("idle");
   const [instruction, setInstruction] = useState("");
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -520,12 +560,15 @@ export default function Studio() {
   const [activeVersionId, setActiveVersionId] = useState<string | null>(null);
   const [records, setRecords] = useState<AppRecord[]>([]);
   const [pendingBuild, setPendingBuild] = useState<PendingBuild | null>(null);
-  const [plan, setPlan] = useState<PlanStep[]>([]);
+  const [plan, setPlan] = useState<BuildPlan | null>(null);
+  const [reasoningSummary, setReasoningSummary] = useState<string[]>([]);
+  const [planProvider, setPlanProvider] = useState<string | null>(null);
+  const [planModel, setPlanModel] = useState<string | null>(null);
+  const [planningLoading, setPlanningLoading] = useState(false);
+  const [buildLog, setBuildLog] = useState<string[]>([]);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("preview");
   const [previewSize, setPreviewSize] = useState<PreviewSize>("desktop");
-  const [buildingStage, setBuildingStage] = useState(0);
-  const [persistStatus, setPersistStatus] = useState<PersistStatus>("idle");
   const [rollbackLoading, setRollbackLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -537,14 +580,11 @@ export default function Studio() {
   const [logoutLoading, setLogoutLoading] = useState(false);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const persistQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const pendingPersistenceRef = useRef<PendingPersistence | null>(null);
-  const persistFailedRef = useRef(false);
   const accountSwitchingRef = useRef(false);
   const mutationInFlightRef = useRef(false);
   const identityEpochRef = useRef(0);
   const openProjectRequestRef = useRef(0);
+  const planRequestRef = useRef(0);
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const accountSwitching = loginLoading || logoutLoading;
@@ -650,27 +690,26 @@ export default function Studio() {
 
   useEffect(() => {
     return () => {
-      if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
       if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
     };
   }, []);
-
-  useEffect(() => {
-    if (phase !== "building") return;
-    const timer = setInterval(() => {
-      setBuildingStage((current) => Math.min(current + 1, BUILDING_STAGES.length - 1));
-    }, 850);
-    return () => clearInterval(timer);
-  }, [phase]);
 
   const openProject = useCallback(async (project: ProjectItem) => {
     const identityEpoch = identityEpochRef.current;
     const requestId = openProjectRequestRef.current + 1;
     openProjectRequestRef.current = requestId;
+    planRequestRef.current += 1;
     setActiveProject(project);
     setVersions([]);
     setActiveVersionId(null);
     setRecords([]);
+    setPendingBuild(null);
+    setPlan(null);
+    setReasoningSummary([]);
+    setPlanProvider(null);
+    setPlanModel(null);
+    setPlanningLoading(false);
+    setBuildLog([]);
     setPhase("ready");
     setVersionsLoading(true);
     setErrorMessage(null);
@@ -721,6 +760,7 @@ export default function Studio() {
 
   const resetToHome = useCallback(() => {
     openProjectRequestRef.current += 1;
+    planRequestRef.current += 1;
     setPhase("home");
     setVersionsLoading(false);
     setActiveProject(null);
@@ -728,47 +768,127 @@ export default function Studio() {
     setActiveVersionId(null);
     setRecords([]);
     setPendingBuild(null);
-    setPlan([]);
+    setPlan(null);
+    setReasoningSummary([]);
+    setPlanProvider(null);
+    setPlanModel(null);
+    setPlanningLoading(false);
+    setBuildLog([]);
     setMessages([]);
     setInstruction("");
-    setBridgeStatus("idle");
     setErrorMessage(null);
     setRetryAction(null);
-    setPersistStatus("idle");
+  }, []);
+
+  const requestBuildPlan = useCallback(async (build: PendingBuild) => {
+    const requestId = planRequestRef.current + 1;
+    planRequestRef.current = requestId;
+    setPlanningLoading(true);
+    setPlan(null);
+    setReasoningSummary([]);
+    setPlanProvider(null);
+    setPlanModel(null);
+    setErrorMessage(null);
+    setRetryAction(null);
+    setMessages((current) =>
+      current.map((message) =>
+        message.meta === "规划失败"
+          ? {
+              ...message,
+              text: "正在重新调用模型生成 BuildPlan。",
+              meta: "正在规划",
+            }
+          : message,
+      ),
+    );
+
+    try {
+      let planned: PlanResponse;
+      try {
+        const payload = await requestJson("/api/plan", {
+          method: "POST",
+          body: JSON.stringify({
+            prompt: build.prompt,
+            ...(build.instruction ? { instruction: build.instruction } : {}),
+            ...(build.previousArtifact
+              ? { previousArtifact: build.previousArtifact }
+              : {}),
+          }),
+        });
+        planned = parsePlanResponse(payload);
+      } catch (error) {
+        const shouldUseLocalBridge =
+          error instanceof ResponseError
+          && error.status === 503
+          && error.code === "OPENAI_NOT_CONFIGURED";
+        if (!shouldUseLocalBridge) throw error;
+
+        try {
+          planned = await planWithLocalCodex(build);
+        } catch (bridgeError) {
+          throw bridgeError;
+        }
+      }
+
+      if (requestId !== planRequestRef.current) return;
+      setPlan(planned.plan);
+      setReasoningSummary(planned.reasoningSummary);
+      setPlanProvider(planned.provider);
+      setPlanModel(planned.model);
+      setMessages((current) =>
+        current.map((message) =>
+          message.meta === "正在规划"
+            ? {
+                ...message,
+                text: "模型已经完成需求分析。请检查下面的 BuildPlan，确认后才会开始生成代码。",
+                meta: `${providerLabel(planned.provider)} · 等待确认`,
+              }
+            : message,
+        ),
+      );
+    } catch (error) {
+      if (requestId !== planRequestRef.current) return;
+      setErrorMessage(getErrorMessage(error, "规划过程中出现问题，请重试。"));
+      setRetryAction("plan");
+      setMessages((current) =>
+        current.map((message) =>
+          message.meta === "正在规划"
+            ? { ...message, text: "规划请求没有完成。可以直接重试。", meta: "规划失败" }
+            : message,
+        ),
+      );
+    } finally {
+      if (requestId === planRequestRef.current) setPlanningLoading(false);
+    }
   }, []);
 
   const beginNewPlan = useCallback(() => {
     if (accountSwitchingRef.current) return;
     const cleanPrompt = prompt.trim();
     if (cleanPrompt.length < 4) {
-      setErrorMessage("再多描述一点吧，例如要管理什么、需要哪些信息。 ");
+      setErrorMessage("再多描述一点吧，例如玩法、交互和完成条件。 ");
       setRetryAction(null);
       return;
     }
-    const resolvedArtifactKind = artifactKindManuallySelected
-      ? artifactKind
-      : inferredArtifactKind(cleanPrompt);
-    setArtifactKind(resolvedArtifactKind);
     const build: PendingBuild = {
       kind: "new",
-      artifactKind: resolvedArtifactKind,
       prompt: cleanPrompt,
     };
     setPendingBuild(build);
-    setPlan(makePlan(build));
     setMessages([
       { id: makeId("message"), role: "user", text: cleanPrompt },
       {
         id: makeId("message"),
         role: "agent",
-        text: "我已经把需求拆成 4 步。确认后我才会开始生成，你也可以先返回补充描述。",
-        meta: "等待确认",
+        text: "正在调用模型理解目标、交互和实现边界。规划完成后会先由你确认。",
+        meta: "正在规划",
       },
     ]);
     setErrorMessage(null);
     setRetryAction(null);
     setPhase("planning");
-  }, [artifactKind, artifactKindManuallySelected, prompt]);
+    void requestBuildPlan(build);
+  }, [prompt, requestBuildPlan]);
 
   const beginRefinePlan = useCallback(() => {
     if (accountSwitchingRef.current) return;
@@ -781,38 +901,37 @@ export default function Studio() {
     }
     const build: PendingBuild = {
       kind: "refine",
-      artifactKind: isWebAppArtifact(activeVersion.artifact) ? "web_app" : "data_app",
       prompt:
         activeProject.prompt
         || activeVersion.prompt
         || getArtifactTitle(activeVersion.artifact),
       instruction: cleanInstruction,
       previousArtifact: activeVersion.artifact,
-      projectId: activeProject.id,
     };
     setPendingBuild(build);
-    setPlan(makePlan(build));
     setMessages((current) => [
       ...current,
       { id: makeId("message"), role: "user", text: cleanInstruction },
       {
         id: makeId("message"),
         role: "agent",
-        text: "我会在当前版本上增量调整，并保留旧版本供随时恢复。先确认一下执行计划。",
-        meta: "等待确认",
+        text: "正在让模型基于当前版本规划这次调整，旧版本会继续保留。",
+        meta: "正在规划",
       },
     ]);
     setErrorMessage(null);
     setRetryAction(null);
     setPhase("planning");
-  }, [activeProject, activeVersion, instruction]);
+    void requestBuildPlan(build);
+  }, [activeProject, activeVersion, instruction, requestBuildPlan]);
 
   const persistVersion = useCallback(
     async (
       project: ProjectItem,
       generated: GenerateResponse,
       build: PendingBuild,
-      nextRecords: AppRecord[],
+      confirmedPlan: BuildPlan,
+      confirmedReasoningSummary: string[],
     ): Promise<VersionItem> => {
       const payload = await requestJson(
         `/api/projects/${encodeURIComponent(project.id)}/versions`,
@@ -821,13 +940,15 @@ export default function Studio() {
           body: JSON.stringify({
             artifact: generated.artifact,
             spec: generated.artifact,
-            records: nextRecords,
+            records: [],
             prompt: build.prompt,
             instruction: build.instruction ?? null,
             provider: generated.provider,
             model: generated.model,
             warning: generated.warning,
             stages: generated.stages,
+            buildPlan: confirmedPlan,
+            reasoningSummary: confirmedReasoningSummary,
           }),
         },
       );
@@ -836,11 +957,13 @@ export default function Studio() {
         return {
           ...normalized,
           prompt: build.prompt,
-          records: nextRecords,
+          records: [],
           provider: generated.provider,
           model: generated.model,
           warning: generated.warning,
           stages: generated.stages,
+          buildPlan: confirmedPlan,
+          reasoningSummary: confirmedReasoningSummary,
         };
       }
       return {
@@ -850,11 +973,13 @@ export default function Studio() {
         prompt: build.prompt,
         instruction: build.instruction ?? null,
         artifact: generated.artifact,
-        records: nextRecords,
+        records: [],
         provider: generated.provider,
         model: generated.model,
         warning: generated.warning,
         stages: generated.stages,
+        buildPlan: confirmedPlan,
+        reasoningSummary: confirmedReasoningSummary,
         createdAt: new Date().toISOString(),
       };
     },
@@ -862,7 +987,7 @@ export default function Studio() {
   );
 
   const executeBuild = useCallback(async () => {
-    if (!pendingBuild) return;
+    if (!pendingBuild || !plan) return;
     if (accountSwitchingRef.current) {
       showNotice("账号切换完成后再开始构建", "error");
       return;
@@ -870,7 +995,9 @@ export default function Studio() {
     if (mutationInFlightRef.current) return;
     mutationInFlightRef.current = true;
     const build = pendingBuild;
-    setBuildingStage(0);
+    const confirmedPlan = plan;
+    const confirmedReasoningSummary = reasoningSummary;
+    setBuildLog(["BuildPlan 已确认", "正在请求线上生成服务"]);
     setPhase("building");
     setErrorMessage(null);
     setRetryAction(null);
@@ -881,17 +1008,12 @@ export default function Studio() {
         const generatedPayload = await requestJson("/api/generate", {
           method: "POST",
           body: JSON.stringify({
-            artifactKind: build.artifactKind === "web_app" ? "web_app" : "crud",
             prompt: build.prompt,
             ...(build.previousArtifact
-              ? {
-                  previousArtifact: build.previousArtifact,
-                  ...(build.artifactKind === "data_app"
-                    ? { previousSpec: build.previousArtifact }
-                    : {}),
-                }
+              ? { previousArtifact: build.previousArtifact }
               : {}),
             ...(build.instruction ? { instruction: build.instruction } : {}),
+            plan: confirmedPlan,
           }),
         });
         if (!isRecord(generatedPayload)) {
@@ -901,11 +1023,8 @@ export default function Studio() {
         if (!artifact) {
           throw new Error("生成结果缺少可运行的应用描述，请重试。 ");
         }
-        if (build.artifactKind === "web_app" && !isWebAppArtifact(artifact)) {
+        if (!isWebAppArtifact(artifact)) {
           throw new Error("生成结果不是可运行的 Web App，请重试。 ");
-        }
-        if (build.artifactKind === "data_app" && isWebAppArtifact(artifact)) {
-          throw new Error("生成结果不是数据应用，请重试。 ");
         }
         const rawProvider = readString(generatedPayload.provider);
         generated = {
@@ -926,24 +1045,30 @@ export default function Studio() {
         };
       } catch (error) {
         const shouldUseLocalBridge =
-          build.artifactKind === "web_app"
-          && error instanceof ResponseError
+          error instanceof ResponseError
           && error.status === 503
           && error.code === "OPENAI_NOT_CONFIGURED";
         if (!shouldUseLocalBridge) throw error;
 
-        setBridgeStatus("checking");
+        setBuildLog((current) => [
+          ...current,
+          "线上未配置 API Key，正在请求本机 Codex",
+        ]);
         try {
-          generated = await generateWithLocalCodex(build);
-          setBridgeStatus("available");
+          generated = await generateWithLocalCodex(build, confirmedPlan);
         } catch (bridgeError) {
-          setBridgeStatus("unavailable");
           throw bridgeError;
         }
       }
 
+      setBuildLog((current) => [
+        ...current,
+        `${providerLabel(generated.provider)} 已返回可运行 Web App`,
+      ]);
+
       let project = activeProject;
       if (build.kind === "new") {
+        setBuildLog((current) => [...current, "正在创建项目"]);
         const projectPayload = await requestJson("/api/projects", {
           method: "POST",
           body: JSON.stringify({
@@ -956,14 +1081,14 @@ export default function Studio() {
       }
       if (!project) throw new Error("找不到要更新的项目，请返回首页重试。 ");
 
-      let nextRecords: AppRecord[] = [];
-      if (!isWebAppArtifact(generated.artifact)) {
-        const generatedSeed = getArtifactSeedData(generated.artifact);
-        nextRecords = build.kind === "refine"
-          ? reconcileRecordsForSpec(records, generated.artifact)
-          : generatedSeed;
-      }
-      const version = await persistVersion(project, generated, build, nextRecords);
+      setBuildLog((current) => [...current, "正在保存应用版本"]);
+      const version = await persistVersion(
+        project,
+        generated,
+        build,
+        confirmedPlan,
+        confirmedReasoningSummary,
+      );
       const nextVersions = sortVersions([
         version,
         ...versions.filter((item) => item.id !== version.id),
@@ -971,21 +1096,21 @@ export default function Studio() {
       setActiveProject(project);
       setVersions(nextVersions);
       setActiveVersionId(version.id);
-      setRecords(version.records);
+      setRecords([]);
       setInstruction("");
       setPendingBuild(null);
-      setPlan([]);
-      setPersistStatus("saved");
+      setPlan(null);
+      setReasoningSummary([]);
+      setPlanProvider(null);
+      setPlanModel(null);
       setMessages((current) => [
-        ...current.filter((message) => message.meta !== "等待确认"),
+        ...current.filter((message) => !message.meta?.includes("等待确认")),
         {
           id: makeId("message"),
           role: "agent",
           text:
             build.kind === "new"
-              ? isWebAppArtifact(generated.artifact)
-                ? `「${project.name}」已经生成。右侧是本次生成的完整 Web App，可以直接操作。`
-                : `「${project.name}」已经生成。右侧是真实可操作的应用，你可以直接新增或编辑数据。`
+              ? `「${project.name}」已经生成。右侧是本次生成的完整 Web App，可以直接操作。`
               : `调整完成，已保存为 v${version.ordinal}。旧版本仍在左侧，可以随时查看或恢复。`,
           meta: `${providerLabel(generated.provider)} 生成`,
         },
@@ -1006,8 +1131,9 @@ export default function Studio() {
     activeProject,
     loadProjects,
     pendingBuild,
+    plan,
     persistVersion,
-    records,
+    reasoningSummary,
     showNotice,
     versions,
   ]);
@@ -1044,13 +1170,15 @@ export default function Studio() {
             sourceVersionId: activeVersion.id,
             artifact: activeVersion.artifact,
             spec: activeVersion.artifact,
-            records,
+            records: [],
             prompt: activeVersion.prompt || activeProject.prompt,
             instruction: `恢复 v${activeVersion.ordinal}`,
             provider: activeVersion.provider ?? "local",
             model: activeVersion.model,
             warning: null,
             stages: ["恢复历史版本"],
+            buildPlan: activeVersion.buildPlan,
+            reasoningSummary: activeVersion.reasoningSummary,
           }),
         },
       );
@@ -1060,18 +1188,23 @@ export default function Studio() {
         (latestVersion?.ordinal ?? 0) + 1,
       );
       const restored = normalized
-        ? normalized
+        ? {
+            ...normalized,
+            records: [],
+            buildPlan: activeVersion.buildPlan,
+            reasoningSummary: activeVersion.reasoningSummary,
+          }
         : {
           ...activeVersion,
           id: makeId("version"),
           ordinal: (latestVersion?.ordinal ?? 0) + 1,
           instruction: `恢复 v${activeVersion.ordinal}`,
-          records,
+          records: [],
           createdAt: new Date().toISOString(),
           };
       setVersions((current) => sortVersions([restored, ...current]));
       setActiveVersionId(restored.id);
-      setRecords(restored.records);
+      setRecords([]);
       setMessages((current) => [
         ...current,
         {
@@ -1096,70 +1229,8 @@ export default function Studio() {
     isHistoricalVersion,
     latestVersion,
     loadProjects,
-    records,
     showNotice,
   ]);
-
-  const patchRecords = useCallback(
-    async (nextRecords: AppRecord[], projectId: string, versionId: string) => {
-      setPersistStatus("saving");
-      persistFailedRef.current = false;
-      try {
-        const payload = await requestJson(
-          `/api/projects/${encodeURIComponent(projectId)}/versions`,
-          {
-          method: "PATCH",
-          body: JSON.stringify({ versionId, records: nextRecords }),
-          },
-        );
-        const updatedProject = normalizeProject(payload);
-        setVersions((current) =>
-          current.map((version) =>
-            version.id === versionId ? { ...version, records: nextRecords } : version,
-          ),
-        );
-        if (updatedProject) {
-          setProjects((current) =>
-            current.map((project) =>
-              project.id === updatedProject.id ? updatedProject : project,
-            ),
-          );
-          setActiveProject((current) =>
-            current?.id === updatedProject.id ? updatedProject : current,
-          );
-        }
-        setPersistStatus("saved");
-      } catch (error) {
-        persistFailedRef.current = true;
-        setPersistStatus("error");
-        setErrorMessage(getErrorMessage(error, "数据未能保存，请稍后再试。"));
-        setRetryAction(null);
-      }
-    },
-    [],
-  );
-
-  const enqueuePendingPersistence = useCallback(() => {
-    const pending = pendingPersistenceRef.current;
-    if (!pending) return persistQueueRef.current;
-
-    pendingPersistenceRef.current = null;
-    persistQueueRef.current = persistQueueRef.current.then(() =>
-      patchRecords(pending.records, pending.projectId, pending.versionId),
-    );
-    return persistQueueRef.current;
-  }, [patchRecords]);
-
-  const flushPendingPersistence = useCallback(async () => {
-    if (persistTimerRef.current) {
-      window.clearTimeout(persistTimerRef.current);
-      persistTimerRef.current = null;
-    }
-    await enqueuePendingPersistence();
-    if (persistFailedRef.current) {
-      throw new Error("数据尚未保存成功，请先重试后再切换账号。");
-    }
-  }, [enqueuePendingPersistence]);
 
   const beginLogin = useCallback(async () => {
     if (accountSwitchingRef.current) return;
@@ -1173,17 +1244,8 @@ export default function Studio() {
     openProjectRequestRef.current += 1;
     setLoginLoading(true);
     setErrorMessage(null);
-    try {
-      await flushPendingPersistence();
-      window.location.assign("/api/auth/github");
-    } catch (error) {
-      accountSwitchingRef.current = false;
-      setErrorMessage(getErrorMessage(error, "登录前保存失败，请稍后重试。"));
-      setLoginLoading(false);
-      setVersionsLoading(false);
-      void loadProjects();
-    }
-  }, [flushPendingPersistence, loadProjects, phase, showNotice]);
+    window.location.assign("/api/auth/github");
+  }, [phase, showNotice]);
 
   const handleLogout = useCallback(async () => {
     if (accountSwitchingRef.current) return;
@@ -1198,7 +1260,6 @@ export default function Studio() {
     setLogoutLoading(true);
     setErrorMessage(null);
     try {
-      await flushPendingPersistence();
       await requestJson("/api/auth/logout", { method: "POST" });
       setUser(null);
       resetToHome();
@@ -1214,7 +1275,7 @@ export default function Studio() {
       accountSwitchingRef.current = false;
       setLogoutLoading(false);
     }
-  }, [flushPendingPersistence, loadProjects, phase, resetToHome, showNotice]);
+  }, [loadProjects, phase, resetToHome, showNotice]);
 
   const exportProject = useCallback(async () => {
     if (!activeProject || !activeVersion) return;
@@ -1265,38 +1326,10 @@ export default function Studio() {
     }
   }, [activeProject, activeVersion, records, showNotice]);
 
-  useEffect(() => {
-    const handlePreviewMessage = (event: MessageEvent) => {
-      if (event.source !== iframeRef.current?.contentWindow || !isRecord(event.data)) return;
-      if (event.data.source !== "forge-preview" || event.data.type !== "records-change") return;
-      if (!activeProject || !activeVersion) return;
-      if (isWebAppArtifact(activeVersion.artifact)) return;
-      if (accountSwitchingRef.current) return;
-      if (isHistoricalVersion) {
-        showNotice("历史版本为只读，请先恢复为新版本再编辑");
-        return;
-      }
-      const payload = isRecord(event.data.payload) ? event.data.payload : event.data;
-      const nextRecords = parseRecords(payload.records);
-      setRecords(nextRecords);
-      pendingPersistenceRef.current = {
-        records: nextRecords,
-        projectId: activeProject.id,
-        versionId: activeVersion.id,
-      };
-      if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
-      persistTimerRef.current = setTimeout(() => {
-        persistTimerRef.current = null;
-        void enqueuePendingPersistence();
-      }, 320);
-    };
-    window.addEventListener("message", handlePreviewMessage);
-    return () => window.removeEventListener("message", handlePreviewMessage);
-  }, [activeProject, activeVersion, enqueuePendingPersistence, isHistoricalVersion, showNotice]);
-
   const handleRetry = useCallback(() => {
     if (retryAction === "projects") void loadProjects();
     if (retryAction === "versions" && activeProject) void openProject(activeProject);
+    if (retryAction === "plan" && pendingBuild) void requestBuildPlan(pendingBuild);
     if (retryAction === "build") void executeBuild();
     if (retryAction === "rollback") void rollbackVersion();
   }, [
@@ -1304,6 +1337,8 @@ export default function Studio() {
     executeBuild,
     loadProjects,
     openProject,
+    pendingBuild,
+    requestBuildPlan,
     retryAction,
     rollbackVersion,
   ]);
@@ -1317,16 +1352,6 @@ export default function Studio() {
 
   const handlePromptChange = (value: string) => {
     setPrompt(value);
-    if (!artifactKindManuallySelected) {
-      setArtifactKind(inferredArtifactKind(value));
-      setBridgeStatus("idle");
-    }
-  };
-
-  const selectArtifactKind = (kind: ArtifactKind) => {
-    setArtifactKind(kind);
-    setArtifactKindManuallySelected(true);
-    setBridgeStatus("idle");
   };
 
   const submitNewProject = (event: FormEvent<HTMLFormElement>) => {
@@ -1340,11 +1365,22 @@ export default function Studio() {
   };
 
   const cancelPlan = () => {
+    planRequestRef.current += 1;
     setErrorMessage(null);
     setRetryAction(null);
     setPendingBuild(null);
-    setPlan([]);
-    setMessages((current) => current.filter((message) => message.meta !== "等待确认"));
+    setPlan(null);
+    setReasoningSummary([]);
+    setPlanProvider(null);
+    setPlanModel(null);
+    setPlanningLoading(false);
+    setMessages((current) =>
+      current.filter(
+        (message) =>
+          message.meta !== "正在规划"
+          && !message.meta?.includes("等待确认"),
+      ),
+    );
     setPhase(activeProject ? "ready" : "home");
   };
 
@@ -1387,7 +1423,7 @@ export default function Studio() {
             <span>现在就造出来。</span>
           </h1>
           <p className="forge-hero__lead">
-            描述你的工作场景。Forge 会先给出计划，确认后生成数据工具或完整 Web App。
+            描述你想做的应用。Forge 会先用模型生成 BuildPlan，确认后再构建可直接运行的 Web App。
           </p>
 
           <form className="prompt-composer" onSubmit={submitNewProject}>
@@ -1399,56 +1435,19 @@ export default function Studio() {
               value={prompt}
               onChange={(event) => handlePromptChange(event.target.value)}
               onKeyDown={handlePromptKeyDown}
-              placeholder="例如：做一个客户线索管理工具，支持按跟进阶段筛选……"
+              placeholder="例如：做一个支持键盘和触屏操作的霓虹贪吃蛇……"
               rows={4}
               maxLength={1200}
               autoFocus
               disabled={accountSwitching}
             />
-            <div className="artifact-mode" aria-label="应用生成类型">
-              <span>生成类型</span>
-              <div className="artifact-mode__options" role="radiogroup" aria-label="选择应用类型">
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={artifactKind === "data_app"}
-                  className={artifactKind === "data_app" ? "is-active" : ""}
-                  onClick={() => selectArtifactKind("data_app")}
-                  disabled={accountSwitching}
-                >
-                  数据应用
-                </button>
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={artifactKind === "web_app"}
-                  className={artifactKind === "web_app" ? "is-active" : ""}
-                  onClick={() => selectArtifactKind("web_app")}
-                  disabled={accountSwitching}
-                >
-                  Web App
-                </button>
-              </div>
-              {artifactKind === "web_app" ? (
-                <small className={`artifact-mode__provider artifact-mode__provider--${bridgeStatus}`}>
-                  <i aria-hidden="true" />
-                  {bridgeStatus === "checking"
-                    ? "正在连接本机 Codex"
-                    : bridgeStatus === "available"
-                      ? "本机 Codex 已连接"
-                      : bridgeStatus === "unavailable"
-                        ? "本机 Codex 未连接"
-                        : "优先 OpenAI · 未配置时使用本机 Codex"}
-                </small>
-              ) : (
-                <small className="artifact-mode__provider">
-                  <i aria-hidden="true" /> AppSpec 安全编译器
-                </small>
-              )}
+            <div className="model-route" aria-label="生成能力">
+              <span><i aria-hidden="true" /> Web App</span>
+              <small>优先线上 OpenAI · 未配置时使用本机 Codex</small>
             </div>
             <div className="prompt-composer__footer">
               <span className="prompt-composer__hint">
-                <kbd>⌘</kbd><kbd>↵</kbd> 提交 · 可继续补充字段和筛选方式
+                <kbd>⌘</kbd><kbd>↵</kbd> 提交 · 先规划，确认后再生成代码
               </span>
               <button
                 className="forge-button forge-button--primary"
@@ -1485,9 +1484,6 @@ export default function Studio() {
                 key={starter.title}
                 onClick={() => {
                   setPrompt(starter.prompt);
-                  setArtifactKind("data_app");
-                  setArtifactKindManuallySelected(true);
-                  setBridgeStatus("idle");
                   document.getElementById("forge-prompt")?.focus();
                 }}
               >
@@ -1619,24 +1615,26 @@ export default function Studio() {
         <span className="studio-topbar__divider" aria-hidden="true">/</span>
         <div className="studio-topbar__project">
           <strong>{workspaceName}</strong>
-          <span>{phase === "building" ? "正在构建" : phase === "planning" ? "等待确认" : "已保存"}</span>
+          <span>
+            {phase === "building"
+              ? "正在构建"
+              : phase === "planning"
+                ? planningLoading ? "模型规划中" : "等待确认"
+                : "已保存"}
+          </span>
         </div>
         <div className="studio-topbar__actions">
           <span
-            className={`save-indicator save-indicator--${persistStatus}`}
+            className="save-indicator save-indicator--saved"
             role="status"
             aria-live="polite"
           >
             <span className="status-dot" aria-hidden="true" />
-            {persistStatus === "saving"
-              ? "正在保存"
-              : persistStatus === "error"
-                ? "保存失败"
-                : sessionLoading
-                  ? "正在确认工作区"
-                  : user
-                    ? "云端已同步"
-                    : "已保存到访客工作区"}
+            {sessionLoading
+              ? "正在确认工作区"
+              : user
+                ? "云端已同步"
+                : "已保存到访客工作区"}
           </span>
           <AccountControl
             user={user}
@@ -1781,62 +1779,149 @@ export default function Studio() {
             </div>
 
             {phase === "planning" && pendingBuild ? (
-              <section className="build-plan" aria-labelledby="plan-title">
-                <div className="build-plan__header">
+              planningLoading ? (
+                <section className="planning-card" aria-busy="true" aria-live="polite">
+                  <span className="planning-card__spinner" aria-hidden="true">✦</span>
                   <div>
-                    <span className="section-heading__kicker">PROPOSED PLAN</span>
-                    <h2 id="plan-title">执行计划</h2>
+                    <span className="section-heading__kicker">MODEL PLANNING</span>
+                    <h2>正在生成 BuildPlan</h2>
+                    <p>模型正在分析需求、交互流程、实现步骤和验收标准。</p>
                   </div>
-                  <span className="plan-badge">
-                    {pendingBuild.artifactKind === "web_app" ? "Web App" : "数据应用"} · 4 steps
-                  </span>
-                </div>
-                <p className="build-plan__brief">
-                  {pendingBuild.kind === "new" ? pendingBuild.prompt : pendingBuild.instruction}
-                </p>
-                <ol className="plan-steps">
-                  {plan.map((step, index) => (
-                    <li key={step.title}>
-                      <span className="plan-steps__number">{String(index + 1).padStart(2, "0")}</span>
-                      <div>
-                        <strong>{step.title}</strong>
-                        <p>{step.detail}</p>
-                      </div>
-                      <span className="plan-steps__ready" aria-label="已准备">✓</span>
-                    </li>
-                  ))}
-                </ol>
-                <div className="build-plan__note">
-                  <span aria-hidden="true">◎</span>
-                  <p>
-                    <strong>版本安全</strong>
-                    {pendingBuild.kind === "refine"
-                      ? "这次调整会创建新版本，不会覆盖当前成果。"
-                      : pendingBuild.artifactKind === "web_app"
-                        ? "生成的完整网页会保存为项目版本，并支持继续调整和导出。"
-                        : "生成后可直接操作，所有数据变化都会自动保存。"}
-                  </p>
-                </div>
-                <div className="build-plan__actions">
                   <button
                     className="forge-button forge-button--ghost"
                     type="button"
                     onClick={cancelPlan}
                     disabled={accountSwitching}
                   >
-                    返回调整
+                    取消
                   </button>
-                  <button
-                    className="forge-button forge-button--primary"
-                    type="button"
-                    onClick={() => void executeBuild()}
-                    disabled={accountSwitching}
-                  >
-                    <span aria-hidden="true">✦</span>
-                    确认并构建
-                  </button>
-                </div>
-              </section>
+                </section>
+              ) : plan ? (
+                <section className="build-plan" aria-labelledby="plan-title">
+                  <div className="build-plan__header">
+                    <div>
+                      <span className="section-heading__kicker">MODEL BUILDPLAN</span>
+                      <h2 id="plan-title">{plan.title}</h2>
+                    </div>
+                    <span className="plan-badge">
+                      Web App · {plan.implementationSteps.length} steps
+                    </span>
+                  </div>
+                  <p className="build-plan__brief">{plan.requestSummary}</p>
+
+                  <div className="build-plan__reasoning">
+                    <strong>模型决策摘要</strong>
+                    {reasoningSummary.length ? (
+                      <ul>
+                        {reasoningSummary.map((item, index) => (
+                          <li key={`${item}-${index}`}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>模型未提供额外决策摘要。</p>
+                    )}
+                  </div>
+
+                  {plan.designDecisions.length || plan.interactionFlow.length ? (
+                    <div className="plan-overview">
+                      {plan.designDecisions.length ? (
+                        <section>
+                          <h3>设计决策</h3>
+                          <ul>
+                            {plan.designDecisions.map((item, index) => (
+                              <li key={`${item}-${index}`}>{item}</li>
+                            ))}
+                          </ul>
+                        </section>
+                      ) : null}
+                      {plan.interactionFlow.length ? (
+                        <section>
+                          <h3>交互流程</h3>
+                          <ol>
+                            {plan.interactionFlow.map((item, index) => (
+                              <li key={`${item}-${index}`}>{item}</li>
+                            ))}
+                          </ol>
+                        </section>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  <div className="plan-section-heading">
+                    <h3>实现步骤</h3>
+                    <small>
+                      {providerLabel(planProvider)}
+                      {planModel ? ` · ${planModel}` : ""}
+                    </small>
+                  </div>
+                  <ol className="plan-steps">
+                    {plan.implementationSteps.map((step, index) => (
+                      <li key={`${step.title}-${index}`}>
+                        <span className="plan-steps__number">
+                          {String(index + 1).padStart(2, "0")}
+                        </span>
+                        <div>
+                          <strong>{step.title}</strong>
+                          <p>{step.description}</p>
+                        </div>
+                        <span className="plan-steps__ready" aria-label="已规划">✓</span>
+                      </li>
+                    ))}
+                  </ol>
+
+                  <div className="plan-details">
+                    <section>
+                      <h3>前提假设</h3>
+                      {plan.assumptions.length ? (
+                        <ul>
+                          {plan.assumptions.map((item, index) => (
+                            <li key={`${item}-${index}`}>{item}</li>
+                          ))}
+                        </ul>
+                      ) : <p>无额外假设</p>}
+                    </section>
+                    <section>
+                      <h3>验收标准</h3>
+                      {plan.acceptanceCriteria.length ? (
+                        <ul>
+                          {plan.acceptanceCriteria.map((item, index) => (
+                            <li key={`${item}-${index}`}>{item}</li>
+                          ))}
+                        </ul>
+                      ) : <p>以主要交互可完整运行作为验收标准</p>}
+                    </section>
+                  </div>
+
+                  <div className="build-plan__note">
+                    <span aria-hidden="true">◎</span>
+                    <p>
+                      <strong>版本安全</strong>
+                      {pendingBuild.kind === "refine"
+                        ? "这次调整会创建新版本，不会覆盖当前成果。"
+                        : "生成的完整网页会保存为项目版本，并支持继续调整和导出。"}
+                    </p>
+                  </div>
+                  <div className="build-plan__actions">
+                    <button
+                      className="forge-button forge-button--ghost"
+                      type="button"
+                      onClick={cancelPlan}
+                      disabled={accountSwitching}
+                    >
+                      返回调整
+                    </button>
+                    <button
+                      className="forge-button forge-button--primary"
+                      type="button"
+                      onClick={() => void executeBuild()}
+                      disabled={accountSwitching}
+                    >
+                      <span aria-hidden="true">✦</span>
+                      确认并构建
+                    </button>
+                  </div>
+                </section>
+              ) : null
             ) : null}
 
             {phase === "building" ? (
@@ -1846,21 +1931,12 @@ export default function Studio() {
                 </div>
                 <span className="section-heading__kicker">FORGE IS BUILDING</span>
                 <h2 id="building-title">正在把计划变成应用</h2>
-                <p>字段、数据与交互正在同时组装，通常只需要几秒。</p>
-                <ol className="building-progress">
-                  {BUILDING_STAGES.map((stage, index) => (
-                    <li
-                      className={
-                        index < buildingStage
-                          ? "is-done"
-                          : index === buildingStage
-                            ? "is-active"
-                            : ""
-                      }
-                      key={stage}
-                    >
-                      <span aria-hidden="true">{index < buildingStage ? "✓" : index + 1}</span>
-                      {stage}
+                <p>正在调用真实生成服务。完成时间取决于模型响应。</p>
+                <ol className="building-log">
+                  {buildLog.map((entry, index) => (
+                    <li className={index === buildLog.length - 1 ? "is-active" : "is-done"} key={`${entry}-${index}`}>
+                      <span aria-hidden="true">{index === buildLog.length - 1 ? "·" : "✓"}</span>
+                      {entry}
                     </li>
                   ))}
                 </ol>
@@ -1881,11 +1957,10 @@ export default function Studio() {
                   <span className="version-pill">v{activeVersion.ordinal}</span>
                 </div>
                 <div className="build-summary__stats">
-                  {isWebAppArtifact(activeVersion.artifact) ? (
-                    <span><strong>Web</strong> 完整网页</span>
-                  ) : (
-                    <span><strong>{getArtifactSeedData(activeVersion.artifact).length}</strong> 示例记录</span>
-                  )}
+                  <span>
+                    <strong>{isWebAppArtifact(activeVersion.artifact) ? "Web" : "Legacy"}</strong>
+                    {isWebAppArtifact(activeVersion.artifact) ? " 完整网页" : " 旧版项目兼容预览"}
+                  </span>
                   <span><strong>Live</strong> 实时预览</span>
                   <span>
                     <strong>{providerLabel(activeVersion.provider)}</strong> 生成来源
@@ -1919,7 +1994,7 @@ export default function Studio() {
                   id="refine-input"
                   value={instruction}
                   onChange={(event) => setInstruction(event.target.value)}
-                  placeholder="例如：增加优先级字段，把状态筛选放到顶部……"
+                  placeholder="例如：增加暂停按钮，把界面改成复古像素风……"
                   rows={3}
                   maxLength={800}
                   disabled={accountSwitching}
@@ -2053,13 +2128,15 @@ export default function Studio() {
                 <div className="code-view__header">
                   <span>
                     <i aria-hidden="true" />
-                    {activeVersion && isWebAppArtifact(activeVersion.artifact)
-                      ? "artifact.json"
-                      : "app-spec.json"}
+                    version.json
                   </span>
-                  <span>结构化描述</span>
+                  <span>完整版本描述</span>
                 </div>
-                <pre><code>{activeVersion ? JSON.stringify(activeVersion.artifact, null, 2) : "{}"}</code></pre>
+                <pre><code>{activeVersion ? JSON.stringify({
+                  artifact: activeVersion.artifact,
+                  buildPlan: activeVersion.buildPlan,
+                  reasoningSummary: activeVersion.reasoningSummary,
+                }, null, 2) : "{}"}</code></pre>
               </div>
             )}
           </div>

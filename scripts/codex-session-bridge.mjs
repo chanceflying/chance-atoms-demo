@@ -17,10 +17,11 @@ const MAX_STDOUT_BYTES = 768_000;
 const MAX_STDERR_BYTES = 128_000;
 const MAX_HTML_BYTES = 300_000;
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const OUTPUT_SCHEMA_PATH = join(SCRIPT_DIR, "web-app-artifact.schema.json");
+const ARTIFACT_SCHEMA_PATH = join(SCRIPT_DIR, "web-app-artifact.schema.json");
+const PLAN_SCHEMA_PATH = join(SCRIPT_DIR, "web-app-plan.schema.json");
 const PRODUCTION_ORIGIN = "https://chance-atoms-demo.chanceflying1.workers.dev";
 
-let generationInFlight = false;
+let modelRequestInFlight = false;
 let activeChild = null;
 
 class HttpError extends Error {
@@ -163,7 +164,105 @@ function validateArtifact(value, fieldName = "artifact") {
   };
 }
 
-function parseGenerateRequest(body) {
+function validateStringArray(
+  value,
+  fieldName,
+  { minItems = 1, maxItems = 12, maxLength = 500 } = {},
+) {
+  if (
+    !Array.isArray(value) ||
+    value.length < minItems ||
+    value.length > maxItems ||
+    value.some(
+      (item) => typeof item !== "string" || !item.trim() || item.length > maxLength,
+    )
+  ) {
+    throw new HttpError(502, `${fieldName} 无效。`);
+  }
+
+  return value.map((item) => item.trim());
+}
+
+function validatePlan(value, fieldName = "plan") {
+  if (!isRecord(value)) throw new HttpError(502, `${fieldName} 不是对象。`);
+  if (value.schemaVersion !== 1 || value.kind !== "web_app_plan") {
+    throw new HttpError(502, `${fieldName} 的版本或类型无效。`);
+  }
+
+  if (typeof value.title !== "string" || !value.title.trim() || value.title.length > 100) {
+    throw new HttpError(502, `${fieldName}.title 无效。`);
+  }
+  if (
+    typeof value.requestSummary !== "string" ||
+    !value.requestSummary.trim() ||
+    value.requestSummary.length > 1_200
+  ) {
+    throw new HttpError(502, `${fieldName}.requestSummary 无效。`);
+  }
+
+  const implementationSteps = value.implementationSteps;
+  if (
+    !Array.isArray(implementationSteps) ||
+    implementationSteps.length < 1 ||
+    implementationSteps.length > 12 ||
+    implementationSteps.some(
+      (step) =>
+        !isRecord(step) ||
+        typeof step.title !== "string" ||
+        !step.title.trim() ||
+        step.title.length > 120 ||
+        typeof step.description !== "string" ||
+        !step.description.trim() ||
+        step.description.length > 600,
+    )
+  ) {
+    throw new HttpError(502, `${fieldName}.implementationSteps 无效。`);
+  }
+
+  return {
+    schemaVersion: 1,
+    kind: "web_app_plan",
+    title: value.title.trim(),
+    requestSummary: value.requestSummary.trim(),
+    designDecisions: validateStringArray(
+      value.designDecisions,
+      `${fieldName}.designDecisions`,
+    ),
+    interactionFlow: validateStringArray(
+      value.interactionFlow,
+      `${fieldName}.interactionFlow`,
+      { maxItems: 16, maxLength: 300 },
+    ),
+    implementationSteps: implementationSteps.map((step) => ({
+      title: step.title.trim(),
+      description: step.description.trim(),
+    })),
+    assumptions: validateStringArray(value.assumptions, `${fieldName}.assumptions`, {
+      minItems: 0,
+      maxLength: 400,
+    }),
+    acceptanceCriteria: validateStringArray(
+      value.acceptanceCriteria,
+      `${fieldName}.acceptanceCriteria`,
+      { maxItems: 16, maxLength: 400 },
+    ),
+  };
+}
+
+function validatePlanResult(value) {
+  if (!isRecord(value)) throw new HttpError(502, "规划结果不是对象。");
+
+  return {
+    plan: validatePlan(value.plan),
+    reasoningSummary: validateStringArray(
+      value.reasoningSummary,
+      "reasoningSummary",
+      { maxItems: 8, maxLength: 2_000 },
+    ),
+  };
+}
+
+function parseRequestContext(body) {
   if (!isRecord(body)) throw new HttpError(400, "请求体必须是对象。 ");
 
   const prompt = cleanInput(body.prompt, "prompt");
@@ -191,7 +290,55 @@ function parseGenerateRequest(body) {
   return { prompt, instruction, previousArtifact };
 }
 
-function buildCodexPrompt({ prompt, instruction, previousArtifact }) {
+function parsePlanRequest(body) {
+  return parseRequestContext(body);
+}
+
+function parseGenerateRequest(body) {
+  const input = parseRequestContext(body);
+  if (body.plan === undefined || body.plan === null) {
+    throw new HttpError(400, "请先生成并确认 BuildPlan。 ");
+  }
+
+  try {
+    return { ...input, plan: validatePlan(body.plan) };
+  } catch (error) {
+    if (error instanceof HttpError) {
+      throw new HttpError(400, error.message);
+    }
+    throw error;
+  }
+}
+
+function describeTask({ prompt, instruction, previousArtifact }) {
+  if (previousArtifact) {
+    return [
+      prompt ? `Original request:\n${prompt}` : "",
+      instruction ? `Change request:\n${instruction}` : "",
+      `Existing artifact:\n${JSON.stringify(previousArtifact)}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  return `User request:\n${prompt || instruction}`;
+}
+
+function buildPlanPrompt(input) {
+  return [
+    "You are the planning provider for the Chance Atoms web application builder.",
+    "Analyze the user's request and return exactly one JSON object matching the provided output schema; do not use Markdown fences or add commentary.",
+    "Create a concrete, request-specific implementation plan for one self-contained browser application with inline HTML, CSS, and JavaScript.",
+    "The plan, implementation steps, acceptance criteria, and reasoningSummary must be generated from this request. Do not use a fixed checklist or assume a particular application type.",
+    "reasoningSummary must contain concise, user-facing design rationale, not hidden chain-of-thought or a transcript of private internal reasoning.",
+    "Do not use external packages, CDNs, remote images, network requests, build tools, or server dependencies.",
+    "Use concise Chinese content when the request is Chinese.",
+    "Do not inspect local files, invoke tools, or modify the filesystem. Produce the plan directly.",
+    describeTask(input),
+  ].join("\n\n");
+}
+
+function buildCodexPrompt({ prompt, instruction, previousArtifact, plan }) {
   const task = previousArtifact
     ? [
         "Update the existing web application while preserving working behavior that the user did not ask to change.",
@@ -209,9 +356,14 @@ function buildCodexPrompt({ prompt, instruction, previousArtifact }) {
     "The html field must contain one complete, self-contained HTML document with inline CSS and JavaScript.",
     "Do not use external packages, CDNs, remote images, network requests, build tools, or server dependencies.",
     "Use concise Chinese UI copy when the request is Chinese. Make the result immediately usable in a sandboxed iframe.",
+    plan
+      ? `Implement the following confirmed build plan and satisfy its acceptance criteria:\n${JSON.stringify(plan)}`
+      : "",
     "Do not inspect local files, invoke tools, or modify the filesystem. Generate the artifact directly.",
     task,
-  ].join("\n\n");
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function childEnvironment() {
@@ -226,7 +378,7 @@ function childEnvironment() {
   return environment;
 }
 
-async function executeCodex(prompt, signal) {
+async function executeCodex(prompt, signal, { schemaPath, validateOutput }) {
   const workingDirectory = await mkdtemp(join(tmpdir(), "chance-atoms-codex-"));
 
   try {
@@ -244,7 +396,7 @@ async function executeCodex(prompt, signal) {
         "--cd",
         workingDirectory,
         "--output-schema",
-        OUTPUT_SCHEMA_PATH,
+        schemaPath,
         "-",
       ];
       const child = spawn("codex", argumentsForCodex, {
@@ -345,7 +497,7 @@ async function executeCodex(prompt, signal) {
     } catch {
       throw new HttpError(502, "Codex 没有返回有效的结构化结果。 ");
     }
-    return validateArtifact(parsed);
+    return validateOutput(parsed);
   } finally {
     await rm(workingDirectory, { recursive: true, force: true }).catch(() => {});
   }
@@ -376,17 +528,20 @@ const server = createServer(async (request, response) => {
     return;
   }
 
-  if (request.method !== "POST" || requestUrl.pathname !== "/generate") {
+  const isPlanRequest = request.method === "POST" && requestUrl.pathname === "/plan";
+  const isGenerateRequest =
+    request.method === "POST" && requestUrl.pathname === "/generate";
+  if (!isPlanRequest && !isGenerateRequest) {
     sendJson(response, 404, { error: "接口不存在。" }, headers);
     return;
   }
 
-  if (generationInFlight) {
-    sendJson(response, 429, { error: "已有生成任务正在执行，请稍后重试。" }, headers);
+  if (modelRequestInFlight) {
+    sendJson(response, 429, { error: "已有模型任务正在执行，请稍后重试。" }, headers);
     return;
   }
 
-  generationInFlight = true;
+  modelRequestInFlight = true;
   const abortController = new AbortController();
   const abort = () => abortController.abort();
   request.once("aborted", abort);
@@ -395,13 +550,25 @@ const server = createServer(async (request, response) => {
   });
 
   try {
-    const input = parseGenerateRequest(await readJson(request));
-    const artifact = await executeCodex(buildCodexPrompt(input), abortController.signal);
+    const body = await readJson(request);
+    const input = isPlanRequest ? parsePlanRequest(body) : parseGenerateRequest(body);
+    const result = isPlanRequest
+      ? await executeCodex(buildPlanPrompt(input), abortController.signal, {
+          schemaPath: PLAN_SCHEMA_PATH,
+          validateOutput: validatePlanResult,
+        })
+      : await executeCodex(buildCodexPrompt(input), abortController.signal, {
+          schemaPath: ARTIFACT_SCHEMA_PATH,
+          validateOutput: validateArtifact,
+        });
     if (!response.destroyed) {
+      const payload = isPlanRequest
+        ? { ...result, provider: PROVIDER, model: MODEL }
+        : { artifact: result, provider: PROVIDER, model: MODEL };
       sendJson(
         response,
         200,
-        { artifact, provider: PROVIDER, model: MODEL },
+        payload,
         headers,
       );
     }
@@ -412,7 +579,7 @@ const server = createServer(async (request, response) => {
     if (status >= 500 && !(error instanceof HttpError)) console.error(error);
     sendJson(response, status, { error: message }, headers);
   } finally {
-    generationInFlight = false;
+    modelRequestInFlight = false;
   }
 });
 

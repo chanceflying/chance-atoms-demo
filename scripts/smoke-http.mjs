@@ -26,9 +26,50 @@ function json(method, body) {
   return { method, body: JSON.stringify(body) };
 }
 
+const planV1 = {
+  schemaVersion: 1,
+  kind: "web_app_plan",
+  title: "构建俄罗斯方块",
+  requestSummary: "创建一个可直接游玩的单页俄罗斯方块。",
+  designDecisions: ["使用 Canvas 绘制棋盘，游戏状态只保留在页面内。"],
+  interactionFlow: ["开始游戏，移动和旋转方块，消行计分，结束后重新开始。"],
+  implementationSteps: [
+    {
+      title: "完成核心游戏循环",
+      description: "实现方块、碰撞、落下、消行、计分、结束和重新开始。",
+    },
+  ],
+  assumptions: ["刷新页面后不保留当前局。"],
+  acceptanceCriteria: ["方块可以移动和旋转，完整行会消除并增加分数。"],
+};
+
+const artifactV1 = {
+  schemaVersion: 1,
+  kind: "web_app",
+  title: "俄罗斯方块",
+  description: "一个自包含的浏览器俄罗斯方块。",
+  html: "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>俄罗斯方块</title><style>body{font-family:sans-serif}</style></head><body><h1>俄罗斯方块</h1><canvas width=\"300\" height=\"600\"></canvas><button>重新开始</button><script>let score=0;</script></body></html>",
+  acceptanceCriteria: ["可以开始和重新开始游戏。"],
+};
+
+const planV2 = {
+  ...planV1,
+  title: "增加暂停能力",
+  requestSummary: "在现有俄罗斯方块中增加暂停和继续。",
+  designDecisions: [...planV1.designDecisions, "暂停时冻结计时循环并保留当前棋盘。"],
+  acceptanceCriteria: [...planV1.acceptanceCriteria, "玩家可以暂停并继续同一局。"],
+};
+
+const artifactV2 = {
+  ...artifactV1,
+  description: "支持暂停和继续的自包含浏览器俄罗斯方块。",
+  html: artifactV1.html.replace("<button>重新开始</button>", "<button>暂停 / 继续</button><button>重新开始</button>"),
+  acceptanceCriteria: [...artifactV1.acceptanceCriteria, "可以暂停和继续同一局。"],
+};
+
 const home = await fetch(`${baseUrl}/`);
 assert.equal(home.status, 200);
-assert.match(await home.text(), /从一句话到可运行工具/);
+assert.match(await home.text(), /AI Web App Builder/);
 
 const initial = await request("/api/projects");
 assert.equal(initial.response.status, 200);
@@ -75,20 +116,9 @@ const crossOriginMutation = await request(
 );
 assert.equal(crossOriginMutation.response.status, 403);
 
-const generated = await request(
-  "/api/generate",
-  json("POST", {
-    prompt: "做一个任务管理工具，包含任务、状态、优先级、负责人和截止日期",
-  }),
-  cookie,
-);
-assert.equal(generated.response.status, 200);
-assert.equal(generated.body.provider, "local");
-assert.ok(generated.body.spec.fields.length >= 4);
-
 const created = await request(
   "/api/projects",
-  json("POST", { name: "HTTP smoke project", prompt: "任务管理工具" }),
+  json("POST", { name: "HTTP smoke Web App", prompt: "做一个俄罗斯方块" }),
   cookie,
 );
 assert.equal(created.response.status, 201);
@@ -98,67 +128,51 @@ const projectId = created.body.project.id;
 const versionOne = await request(
   `/api/projects/${projectId}/versions`,
   json("POST", {
-    spec: generated.body.spec,
-    records: generated.body.spec.seedData,
-    prompt: "任务管理工具",
-    provider: "local",
-    stages: ["smoke"],
+    artifact: artifactV1,
+    records: [{ id: "should-not-persist", values: [] }],
+    buildPlan: planV1,
+    reasoningSummary: ["Canvas 足以支持这个单页游戏，且不需要服务端运行时。"],
+    prompt: "做一个俄罗斯方块",
+    provider: "fixture",
+    model: "smoke",
+    stages: ["规划完成", "产物校验通过"],
   }),
   cookie,
 );
 assert.equal(versionOne.response.status, 201);
 assert.equal(versionOne.body.version.version, 1);
+assert.deepEqual(versionOne.body.version.artifact, artifactV1);
+assert.deepEqual(versionOne.body.version.buildPlan, planV1);
+assert.deepEqual(versionOne.body.version.records, []);
 const versionOneId = versionOne.body.version.id;
-
-const emptied = await request(
-  `/api/projects/${projectId}/versions`,
-  json("PATCH", { versionId: versionOneId, records: [] }),
-  cookie,
-);
-assert.equal(emptied.response.status, 200);
-assert.deepEqual(emptied.body.project.records, []);
-
-const afterEmpty = await request(`/api/projects/${projectId}/versions`, {}, cookie);
-assert.equal(afterEmpty.response.status, 200);
-assert.deepEqual(afterEmpty.body.versions[0].records, []);
-
-const refined = await request(
-  "/api/generate",
-  json("POST", {
-    prompt: "任务管理工具",
-    previousSpec: generated.body.spec,
-    instruction: "增加电话号码字段，并改成卡片布局",
-  }),
-  cookie,
-);
-assert.equal(refined.response.status, 200);
-assert.ok(refined.body.spec.fields.some((field) => field.id === "phone"));
-assert.equal(refined.body.spec.layout, "cards");
 
 const versionTwo = await request(
   `/api/projects/${projectId}/versions`,
   json("POST", {
-    spec: refined.body.spec,
-    records: [],
-    prompt: "任务管理工具",
-    instruction: "增加电话号码字段，并改成卡片布局",
-    provider: "local",
-    stages: ["smoke"],
+    artifact: artifactV2,
+    records: [{ id: "also-not-persisted", values: [] }],
+    buildPlan: planV2,
+    reasoningSummary: ["暂停只需要冻结游戏循环，不需要新增后端状态。"],
+    prompt: "做一个俄罗斯方块",
+    instruction: "增加暂停功能",
+    provider: "fixture",
+    model: "smoke",
+    stages: ["增量规划完成", "版本产物校验通过"],
   }),
   cookie,
 );
 assert.equal(versionTwo.response.status, 201);
 assert.equal(versionTwo.body.version.version, 2);
+assert.deepEqual(versionTwo.body.version.artifact, artifactV2);
+assert.deepEqual(versionTwo.body.version.buildPlan, planV2);
+assert.deepEqual(versionTwo.body.version.records, []);
 
-const invalidRecords = await request(
-  `/api/projects/${projectId}/versions`,
-  json("PATCH", {
-    versionId: versionTwo.body.version.id,
-    records: [{ id: "bad-record", values: [{ fieldId: "unknown", value: "x" }] }],
-  }),
-  cookie,
-);
-assert.equal(invalidRecords.response.status, 400);
+const history = await request(`/api/projects/${projectId}/versions`, {}, cookie);
+assert.equal(history.response.status, 200);
+assert.equal(history.body.versions.length, 2);
+assert.deepEqual(history.body.versions[0].reasoningSummary, [
+  "暂停只需要冻结游戏循环，不需要新增后端状态。",
+]);
 
 const rolledBack = await request(
   `/api/projects/${projectId}/versions`,
@@ -167,12 +181,17 @@ const rolledBack = await request(
 );
 assert.equal(rolledBack.response.status, 201);
 assert.equal(rolledBack.body.version.version, 3);
+assert.deepEqual(rolledBack.body.version.artifact, artifactV1);
+assert.deepEqual(rolledBack.body.version.buildPlan, planV1);
+assert.deepEqual(rolledBack.body.version.reasoningSummary, [
+  "Canvas 足以支持这个单页游戏，且不需要服务端运行时。",
+]);
 assert.deepEqual(rolledBack.body.version.records, []);
 
 const archive = await request(
   "/api/export",
   json("POST", {
-    spec: rolledBack.body.version.spec,
+    artifact: rolledBack.body.version.artifact,
     records: rolledBack.body.version.records,
     projectId,
   }),
@@ -180,7 +199,9 @@ const archive = await request(
 );
 assert.equal(archive.response.status, 200);
 assert.equal(archive.response.headers.get("content-type"), "application/zip");
-assert.deepEqual(Array.from(new Uint8Array(archive.body).slice(0, 4)), [0x50, 0x4b, 0x03, 0x04]);
+assert.deepEqual(Array.from(new Uint8Array(archive.body).slice(0, 4)), [
+  0x50, 0x4b, 0x03, 0x04,
+]);
 
 const isolated = await request("/api/projects");
 assert.equal(isolated.response.status, 200);
@@ -197,15 +218,14 @@ console.log(
       baseUrl,
       checks: [
         "home",
-        "guest session and logout origin",
+        "guest session and GitHub auth boundary",
         "mutation origin boundary",
         "workspace isolation",
-        "fallback generation",
-        "project persistence",
-        "empty records",
-        "refinement",
-        "server validation",
-        "rollback",
+        "Web App project persistence",
+        "ephemeral gameplay records",
+        "BuildPlan and reasoning summary persistence",
+        "version evolution",
+        "rollback creates a new version",
         "standalone export",
       ],
     },

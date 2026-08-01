@@ -43,6 +43,8 @@ export const versions = sqliteTable(
     provider: text("provider"),
     model: text("model"),
     warning: text("warning"),
+    buildPlan: text("build_plan").notNull().default("{}"),
+    reasoningSummary: text("reasoning_summary").notNull().default("[]"),
     stages: text("stages").notNull().default("[]"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
