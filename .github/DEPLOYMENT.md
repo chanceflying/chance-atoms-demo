@@ -14,7 +14,7 @@ Configure these environment secrets:
 | --- | --- | --- |
 | `CLOUDFLARE_API_TOKEN` | Yes | Deploy Workers and apply D1 migrations. Scope it to the target account and grant only Workers Scripts and D1 edit access. |
 | `CLOUDFLARE_ACCOUNT_ID` | Yes | Select the Cloudflare account that owns the Worker and D1 database. |
-| `OPENAI_API_KEY` | No | Enables model-backed generation. Without it, the application uses its deterministic fallback agent. |
+| `OPENAI_API_KEY` | No | Enables server-side model planning, generation, and chat. Without it, those routes return `503 + OPENAI_NOT_CONFIGURED`; a browser on the demo operator's machine can then use the separately started local Codex Bridge. |
 
 Never add secret values to `wrangler.jsonc`, `.env.example`, workflow YAML, an
 issue, or a pull request. Local `.env*` files are ignored by Git.

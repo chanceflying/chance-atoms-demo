@@ -7,7 +7,7 @@ Describe the user-visible outcome and the reason for the change.
 - [ ] `npm run lint`
 - [ ] `npm exec tsc -- --noEmit`
 - [ ] `npm test`
-- [ ] `npm run build`
+- [ ] `npm run build:worker`
 
 ## Deployment and data
 
