@@ -3,6 +3,7 @@
 import {
   FormEvent,
   KeyboardEvent,
+  PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -22,11 +23,18 @@ import { compileAppToHtml } from "@/lib/generator";
 import UiIcon from "./UiIcon";
 
 type StudioPhase = "home" | "planning" | "building" | "ready";
-type LandingView = "home" | "projects";
+type LandingView = "home" | "projects" | "project";
 type InspectorTab = "preview" | "code" | "spec";
 type PreviewSize = "desktop" | "mobile";
 type RetryAction = "projects" | "versions" | "plan" | "build" | "rollback" | null;
 type ProjectKind = "web_app" | "chat";
+type ProjectFilter = "all" | ProjectKind;
+
+type StudioProps = {
+  initialView?: LandingView;
+  initialProjectId?: string;
+  initialProjectKind?: ProjectKind;
+};
 
 type ProjectItem = {
   id: string;
@@ -110,6 +118,7 @@ type SessionUser = {
   login: string;
   name: string | null;
   avatarUrl: string | null;
+  email?: string | null;
 };
 
 type Notice = {
@@ -385,6 +394,7 @@ function normalizeSessionUser(payload: unknown): SessionUser | null {
     login,
     name: readNullableString(payload.user.name),
     avatarUrl: readNullableString(payload.user.avatarUrl),
+    email: readNullableString(payload.user.email),
   };
 }
 
@@ -666,11 +676,19 @@ function safeCompile(
   }
 }
 
-export default function Studio() {
+export default function Studio({
+  initialView = "home",
+  initialProjectId,
+  initialProjectKind,
+}: StudioProps = {}) {
   const [phase, setPhase] = useState<StudioPhase>("home");
-  const [landingView, setLandingView] = useState<LandingView>("home");
+  const [landingView, setLandingView] = useState<LandingView>(initialView);
   const [capability, setCapability] = useState<ProjectKind>("chat");
-  const [prompt, setPrompt] = useState("");
+  const [promptByCapability, setPromptByCapability] = useState<Record<ProjectKind, string>>({
+    chat: "",
+    web_app: "",
+  });
+  const [projectFilter, setProjectFilter] = useState<ProjectFilter>("all");
   const [instruction, setInstruction] = useState("");
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -706,8 +724,12 @@ export default function Studio() {
   const [chatSending, setChatSending] = useState(false);
   const [chatMemory, setChatMemory] = useState<ChatMemory>({ enabled: false, content: "" });
   const [memorySaving, setMemorySaving] = useState(false);
+  const [memoryPanelOpen, setMemoryPanelOpen] = useState(true);
+  const [agentPanePercent, setAgentPanePercent] = useState(42);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+  const initialProjectOpenedRef = useRef(false);
   const accountSwitchingRef = useRef(false);
   const mutationInFlightRef = useRef(false);
   const identityEpochRef = useRef(0);
@@ -719,13 +741,66 @@ export default function Studio() {
   const chatCreateInFlightRef = useRef(false);
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const prompt = promptByCapability[capability];
+  const setPrompt = useCallback((value: string) => {
+    setPromptByCapability((current) => ({ ...current, [capability]: value }));
+  }, [capability]);
+
   const accountSwitching = loginLoading || logoutLoading;
   const workspaceWriteBusy =
     phase === "building"
+    || phase === "planning"
     || rollbackLoading
     || chatSending
     || Boolean(deletingProjectId)
     || (phase === "home" && chatLoading);
+
+  const sortedProjects = useMemo(
+    () => [...projects].sort((a, b) => {
+      const aTime = Date.parse(a.updatedAt ?? a.createdAt ?? "") || 0;
+      const bTime = Date.parse(b.updatedAt ?? b.createdAt ?? "") || 0;
+      return bTime - aTime;
+    }),
+    [projects],
+  );
+
+  const recentProjects = useMemo(() => sortedProjects.slice(0, 5), [sortedProjects]);
+  const filteredProjects = useMemo(
+    () => projectFilter === "all"
+      ? sortedProjects
+      : sortedProjects.filter((project) => project.kind === projectFilter),
+    [projectFilter, sortedProjects],
+  );
+
+  const workspaceOwner = user?.email?.split("@")[0]?.trim() || user?.login || "游客";
+
+  const updatePath = useCallback((path: string, replace = false) => {
+    if (typeof window === "undefined" || window.location.pathname === path) return;
+    window.history[replace ? "replaceState" : "pushState"](
+      { ...window.history.state, atomsPath: path },
+      "",
+      path,
+    );
+  }, []);
+
+  const goHome = useCallback(() => {
+    setLandingView("home");
+    updatePath("/");
+  }, [updatePath]);
+
+  const goProjects = useCallback(() => {
+    setLandingView("projects");
+    updatePath("/projects");
+  }, [updatePath]);
+
+  const resumeWorkspace = useCallback(() => {
+    setLandingView("project");
+    if (activeProject) {
+      updatePath(`/${activeProject.kind === "chat" ? "chat" : "apps"}/${encodeURIComponent(activeProject.id)}`);
+    } else if (pendingBuild) {
+      updatePath("/apps/draft");
+    }
+  }, [activeProject, pendingBuild, updatePath]);
 
   const activeVersion = useMemo(
     () => versions.find((version) => version.id === activeVersionId) ?? versions[0] ?? null,
@@ -832,7 +907,10 @@ export default function Studio() {
     };
   }, []);
 
-  const openProject = useCallback(async (project: ProjectItem) => {
+  const openProject = useCallback(async (
+    project: ProjectItem,
+    options?: { updateUrl?: boolean },
+  ) => {
     if (
       mutationInFlightRef.current
       || chatSendInFlightRef.current
@@ -848,6 +926,10 @@ export default function Studio() {
     workspaceEpochRef.current += 1;
     chatRequestRef.current += 1;
     chatSendInFlightRef.current = false;
+    setLandingView("project");
+    if (options?.updateUrl !== false) {
+      updatePath(`/${project.kind === "chat" ? "chat" : "apps"}/${encodeURIComponent(project.id)}`);
+    }
     setActiveProject(project);
     setVersions([]);
     setActiveVersionId(null);
@@ -949,7 +1031,64 @@ export default function Studio() {
         setVersionsLoading(false);
       }
     }
-  }, [showNotice]);
+  }, [showNotice, updatePath]);
+
+  useEffect(() => {
+    if (
+      initialProjectOpenedRef.current
+      || initialView !== "project"
+      || !initialProjectId
+      || projectsLoading
+    ) return;
+    const project = projects.find((item) => (
+      item.id === initialProjectId
+      && (!initialProjectKind || item.kind === initialProjectKind)
+    ));
+    initialProjectOpenedRef.current = true;
+    const timer = window.setTimeout(() => {
+      if (project) {
+        void openProject(project, { updateUrl: false });
+        return;
+      }
+      setLandingView("projects");
+      setErrorMessage("没有找到这个项目，它可能已经被删除。 ");
+      setRetryAction("projects");
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [
+    initialProjectId,
+    initialProjectKind,
+    initialView,
+    openProject,
+    projects,
+    projectsLoading,
+  ]);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const path = window.location.pathname;
+      if (path === "/") {
+        setLandingView("home");
+        return;
+      }
+      if (path === "/projects") {
+        setLandingView("projects");
+        return;
+      }
+      if (path === "/apps/draft" && pendingBuild) {
+        setLandingView("project");
+        return;
+      }
+      const match = path.match(/^\/(chat|apps)\/([^/]+)$/);
+      if (!match) return;
+      const project = projects.find((item) => item.id === decodeURIComponent(match[2]));
+      if (!project) return;
+      if (activeProject?.id === project.id) setLandingView("project");
+      else void openProject(project, { updateUrl: false });
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [activeProject?.id, openProject, pendingBuild, projects]);
 
   const resetToHome = useCallback(() => {
     openProjectRequestRef.current += 1;
@@ -981,7 +1120,8 @@ export default function Studio() {
     setChatMemory({ enabled: false, content: "" });
     setErrorMessage(null);
     setRetryAction(null);
-  }, []);
+    updatePath("/");
+  }, [updatePath]);
 
   const requestBuildPlan = useCallback(async (
     build: PendingBuild,
@@ -1103,6 +1243,12 @@ export default function Studio() {
       kind: "new",
       prompt: cleanPrompt,
     };
+    openProjectRequestRef.current += 1;
+    workspaceEpochRef.current += 1;
+    setActiveProject(null);
+    setVersions([]);
+    setActiveVersionId(null);
+    setRecords([]);
     setPendingBuild(build);
     setPlanFeedback("");
     setMessages([
@@ -1117,8 +1263,10 @@ export default function Studio() {
     setErrorMessage(null);
     setRetryAction(null);
     setPhase("planning");
+    setLandingView("project");
+    updatePath("/apps/draft");
     void requestBuildPlan(build);
-  }, [prompt, requestBuildPlan]);
+  }, [prompt, requestBuildPlan, updatePath]);
 
   const beginRefinePlan = useCallback(() => {
     if (accountSwitchingRef.current) return;
@@ -1250,6 +1398,32 @@ export default function Studio() {
     setRetryAction(null);
     setInspectorTab("preview");
     try {
+      let project = activeProject;
+      if (build.kind === "new" && !project) {
+        if (isCurrentWorkspace()) {
+          setBuildLog((current) => [...current, "正在创建可恢复的项目草稿"]);
+        }
+        const projectPayload = await requestJson("/api/projects", {
+          method: "POST",
+          body: JSON.stringify({
+            name: deriveProjectName(build.prompt),
+            prompt: build.prompt,
+          }),
+        });
+        project = normalizeProject(projectPayload);
+        if (!project) throw new Error("创建项目草稿失败，请重试。 ");
+        if (isCurrentWorkspace()) {
+          setActiveProject(project);
+          setProjects((current) => [
+            project as ProjectItem,
+            ...current.filter((item) => item.id !== project?.id),
+          ]);
+          if (window.location.pathname === "/apps/draft") {
+            updatePath(`/apps/${encodeURIComponent(project.id)}`, true);
+          }
+        }
+      }
+
       let generated: GenerateResponse;
       try {
         const generatedPayload = await requestJson("/api/generate", {
@@ -1317,21 +1491,6 @@ export default function Studio() {
         ]);
       }
 
-      let project = activeProject;
-      if (build.kind === "new") {
-        if (isCurrentWorkspace()) {
-          setBuildLog((current) => [...current, "正在创建项目"]);
-        }
-        const projectPayload = await requestJson("/api/projects", {
-          method: "POST",
-          body: JSON.stringify({
-            name: deriveProjectName(build.prompt, generated.artifact),
-            prompt: build.prompt,
-          }),
-        });
-        project = normalizeProject(projectPayload);
-        if (!project) throw new Error("应用已生成，但创建项目失败，请重试。 ");
-      }
       if (!project) throw new Error("找不到要更新的项目，请返回首页重试。 ");
 
       if (isCurrentWorkspace()) {
@@ -1394,6 +1553,7 @@ export default function Studio() {
     persistVersion,
     reasoningSummary,
     showNotice,
+    updatePath,
     versions,
   ]);
 
@@ -1640,6 +1800,8 @@ export default function Studio() {
       setVersions([]);
       setActiveVersionId(null);
       setPhase("ready");
+      setLandingView("project");
+      updatePath(`/chat/${encodeURIComponent(project.id)}`);
       setChatMessages([]);
       setChatMemory({ enabled: true, content: "" });
       setPrompt("");
@@ -1656,7 +1818,7 @@ export default function Studio() {
       chatCreateInFlightRef.current = false;
       setChatLoading(false);
     }
-  }, [prompt, sendChatMessage]);
+  }, [prompt, sendChatMessage, setPrompt, updatePath]);
 
   const saveChatMemory = useCallback(async () => {
     if (!activeProject || activeProject.kind !== "chat") return;
@@ -1857,6 +2019,30 @@ export default function Studio() {
     beginRefinePlan();
   };
 
+  const startPaneResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const container = splitContainerRef.current;
+    if (!container) return;
+    event.preventDefault();
+    const previousCursor = document.body.style.cursor;
+    const previousSelection = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const handleMove = (moveEvent: PointerEvent) => {
+      const rect = container.getBoundingClientRect();
+      const next = ((moveEvent.clientX - rect.left) / rect.width) * 100;
+      setAgentPanePercent(Math.min(62, Math.max(32, next)));
+    };
+    const handleUp = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousSelection;
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+    };
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp);
+  };
+
   const cancelPlan = () => {
     planRequestRef.current += 1;
     setErrorMessage(null);
@@ -1876,21 +2062,32 @@ export default function Studio() {
       ),
     );
     setPhase(activeProject ? "ready" : "home");
+    if (!activeProject) {
+      setLandingView("home");
+      updatePath("/");
+    }
   };
 
-  if (phase === "home" && landingView === "projects") {
+  if (landingView === "projects") {
     return (
       <main className="atoms-shell">
         <AtomsSidebar
           active="projects"
+          projects={recentProjects}
           projectCount={projects.length}
+          activeProjectId={activeProject?.id ?? null}
+          hasDraft={Boolean(pendingBuild && !activeProject)}
+          draftName={pendingBuild ? deriveProjectName(pendingBuild.prompt) : null}
           user={user}
           sessionLoading={sessionLoading}
           loginLoading={loginLoading}
           logoutLoading={logoutLoading}
-          busy={accountSwitching || workspaceWriteBusy}
-          onHome={() => setLandingView("home")}
-          onProjects={() => setLandingView("projects")}
+          busy={accountSwitching}
+          workspaceBusy={workspaceWriteBusy}
+          onHome={goHome}
+          onProjects={goProjects}
+          onOpenProject={(project) => void openProject(project)}
+          onOpenDraft={resumeWorkspace}
           onLogin={() => void beginLogin()}
           onLogout={() => void handleLogout()}
         />
@@ -1898,14 +2095,14 @@ export default function Studio() {
         <section className="atoms-page atoms-projects-page" aria-labelledby="atoms-projects-title">
           <header className="atoms-page-header">
             <div>
-              <span>CHANCE 的工作区</span>
+              <span>{workspaceOwner} 的工作区</span>
               <h1 id="atoms-projects-title">我的项目</h1>
               <p>管理已经保存的 Web App 和对话，随时继续上一次工作。</p>
             </div>
             <button
               className="atoms-primary-action"
               type="button"
-              onClick={() => setLandingView("home")}
+              onClick={goHome}
               disabled={accountSwitching || workspaceWriteBusy}
             >
               <UiIcon name="plus" />
@@ -1913,10 +2110,25 @@ export default function Studio() {
             </button>
           </header>
 
-          <div className="atoms-project-summary" aria-label="项目统计">
-            <span><UiIcon name="folder" /><strong>{projects.length} 个项目</strong></span>
-            <span><UiIcon name="panels" />{projects.filter((item) => item.kind === "web_app").length} 个 Web App</span>
-            <span><UiIcon name="message" />{projects.filter((item) => item.kind === "chat").length} 个对话</span>
+          <div className="atoms-project-summary" role="tablist" aria-label="按项目类型筛选">
+            {([
+              ["all", "全部项目", projects.length, "folder"],
+              ["chat", "对话", projects.filter((item) => item.kind === "chat").length, "message"],
+              ["web_app", "Web App", projects.filter((item) => item.kind === "web_app").length, "panels"],
+            ] as const).map(([filter, label, count, icon]) => (
+              <button
+                key={filter}
+                type="button"
+                role="tab"
+                aria-selected={projectFilter === filter}
+                className={projectFilter === filter ? "is-active" : ""}
+                onClick={() => setProjectFilter(filter)}
+              >
+                <UiIcon name={icon} />
+                <strong>{label}</strong>
+                <small>{count}</small>
+              </button>
+            ))}
           </div>
 
           <div className="atoms-sync-note" role="status" aria-live="polite">
@@ -1933,9 +2145,9 @@ export default function Studio() {
             <div className="atoms-project-grid" role="status" aria-label="正在载入项目" aria-busy="true">
               {[0, 1, 2].map((item) => <div className="atoms-project-card atoms-project-card--skeleton" key={item} />)}
             </div>
-          ) : errorMessage && retryAction === "projects" ? null : projects.length ? (
+          ) : errorMessage && retryAction === "projects" ? null : projects.length && filteredProjects.length ? (
             <div className="atoms-project-grid">
-              {projects.map((project, index) => (
+              {filteredProjects.map((project, index) => (
                 <article className={`atoms-project-card atoms-project-card--tone-${(index % 3) + 1}`} key={project.id}>
                   <button
                     className={`atoms-project-card__cover atoms-project-card__cover--${project.kind}`}
@@ -1985,12 +2197,21 @@ export default function Studio() {
                 </article>
               ))}
             </div>
+          ) : projects.length ? (
+            <div className="atoms-project-empty">
+              <span><UiIcon name={projectFilter === "chat" ? "message" : "panels"} /></span>
+              <strong>这个分类还没有项目</strong>
+              <p>切换到“全部”，或者从首页创建一个新项目。</p>
+              <button type="button" className="atoms-primary-action" onClick={goHome}>
+                <UiIcon name="plus" />去首页创建
+              </button>
+            </div>
           ) : (
             <div className="atoms-project-empty">
               <span><UiIcon name="folder" /></span>
               <strong>还没有项目</strong>
               <p>从一次对话或一个 Web App 想法开始。</p>
-              <button type="button" className="atoms-primary-action" onClick={() => setLandingView("home")}>
+              <button type="button" className="atoms-primary-action" onClick={goHome}>
                 <UiIcon name="plus" />创建第一个项目
               </button>
             </div>
@@ -2001,7 +2222,7 @@ export default function Studio() {
     );
   }
 
-  if (phase === "home") {
+  if (landingView === "home") {
     const suggestions = HOME_SUGGESTIONS[capability];
     const guides = HOME_GUIDES[capability];
 
@@ -2009,14 +2230,21 @@ export default function Studio() {
       <main className="atoms-shell">
         <AtomsSidebar
           active="home"
+          projects={recentProjects}
           projectCount={projects.length}
+          activeProjectId={activeProject?.id ?? null}
+          hasDraft={Boolean(pendingBuild && !activeProject)}
+          draftName={pendingBuild ? deriveProjectName(pendingBuild.prompt) : null}
           user={user}
           sessionLoading={sessionLoading}
           loginLoading={loginLoading}
           logoutLoading={logoutLoading}
-          busy={accountSwitching || workspaceWriteBusy}
-          onHome={() => setLandingView("home")}
-          onProjects={() => setLandingView("projects")}
+          busy={accountSwitching}
+          workspaceBusy={workspaceWriteBusy}
+          onHome={goHome}
+          onProjects={goProjects}
+          onOpenProject={(project) => void openProject(project)}
+          onOpenDraft={resumeWorkspace}
           onLogin={() => void beginLogin()}
           onLogout={() => void handleLogout()}
         />
@@ -2051,7 +2279,7 @@ export default function Studio() {
                 disabled={accountSwitching || workspaceWriteBusy}
               >
                 <span><UiIcon name="message" /></span>
-                <span><strong>对话</strong><small>持续交流与长期记忆</small></span>
+                <span><strong>对话</strong><small>围绕一个主题持续交流，随时接着聊</small></span>
                 <UiIcon name="check-circle" />
               </button>
               <button
@@ -2063,7 +2291,7 @@ export default function Studio() {
                 disabled={accountSwitching || workspaceWriteBusy}
               >
                 <span><UiIcon name="panels" /></span>
-                <span><strong>Web App 构建</strong><small>可运行预览与版本演进</small></span>
+                <span><strong>Web App 构建</strong><small>描述页面或游戏，生成并持续修改应用</small></span>
                 <UiIcon name="check-circle" />
               </button>
             </div>
@@ -2127,7 +2355,7 @@ export default function Studio() {
               ))}
             </div>
 
-            <button className="atoms-project-handoff" type="button" onClick={() => setLandingView("projects")}>
+            <button className="atoms-project-handoff" type="button" onClick={goProjects}>
               <span><UiIcon name="folder-heart" /></span>
               <span>
                 <strong>创作内容会自动保存</strong>
@@ -2153,8 +2381,8 @@ export default function Studio() {
           <button
             className="forge-brand forge-brand--button"
             type="button"
-            onClick={resetToHome}
-            disabled={accountSwitching || workspaceWriteBusy}
+            onClick={goHome}
+            disabled={accountSwitching}
           >
             <span className="atoms-logo-mark" aria-hidden="true"><UiIcon name="atom" /></span>
             <span className="forge-brand__word">Atoms</span>
@@ -2186,53 +2414,29 @@ export default function Studio() {
               onLogout={() => void handleLogout()}
               compact
             />
-            <button className="icon-button" type="button" onClick={resetToHome} aria-label="新建项目" disabled={accountSwitching || workspaceWriteBusy}><UiIcon name="plus" /></button>
           </div>
         </header>
 
-        <div className="chat-layout">
-          <aside className="studio-sidebar" aria-label="项目列表">
-            <div className="sidebar-section sidebar-section--versions">
-              <div className="sidebar-section__heading">
-                <span>全部项目</span>
-                <button type="button" onClick={resetToHome} aria-label="创建新项目" disabled={accountSwitching || workspaceWriteBusy}><UiIcon name="plus" /></button>
-              </div>
-              <div className="sidebar-projects">
-                {projects.map((project) => (
-                  <div className={`sidebar-project-row${project.id === activeProject.id ? " is-active" : ""}`} key={project.id}>
-                    <button
-                      className="sidebar-project-row__open"
-                      type="button"
-                      onClick={() => void openProject(project)}
-                      disabled={accountSwitching || workspaceWriteBusy}
-                    >
-                      <span className="sidebar-projects__mark" aria-hidden="true">
-                        <UiIcon name={project.kind === "chat" ? "message" : "panels"} />
-                      </span>
-                      <span>{project.name}</span>
-                      <small>{project.kind === "chat" ? "对话" : "Web"}</small>
-                    </button>
-                    <button
-                      className="sidebar-project-row__delete"
-                      type="button"
-                      onClick={() => void deleteProject(project)}
-                      disabled={accountSwitching || workspaceWriteBusy}
-                      aria-label={`删除项目 ${project.name}`}
-                    ><UiIcon name="trash" /></button>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="sidebar-footer"><span className="status-dot status-dot--live" aria-hidden="true" /> Chat ready</div>
-          </aside>
-
+        <div className={`chat-layout${memoryPanelOpen ? "" : " chat-layout--memory-hidden"}`}>
           <section className="chat-workspace" aria-labelledby="chat-title">
             <header className="chat-workspace__header">
               <div>
                 <span className="agent-avatar" aria-hidden="true"><UiIcon name="sparkles" /></span>
                 <div><strong id="chat-title">Atoms Agent</strong><span>连续对话</span></div>
               </div>
-              <span className="agent-status"><i aria-hidden="true" /> 在线</span>
+              <div className="chat-workspace__tools">
+                <button
+                  type="button"
+                  className={memoryPanelOpen ? "is-active" : ""}
+                  onClick={() => setMemoryPanelOpen((current) => !current)}
+                  aria-expanded={memoryPanelOpen}
+                  aria-controls="chat-memory-panel"
+                >
+                  <UiIcon name="brain" />
+                  {memoryPanelOpen ? "隐藏长期记忆" : "显示长期记忆"}
+                </button>
+                <span className="agent-status"><i aria-hidden="true" /> 在线</span>
+              </div>
             </header>
 
             <div className="chat-thread" aria-live="polite">
@@ -2297,7 +2501,7 @@ export default function Studio() {
             </form>
           </section>
 
-          <aside className="memory-panel" aria-labelledby="memory-title">
+          {memoryPanelOpen ? <aside id="chat-memory-panel" className="memory-panel" aria-labelledby="memory-title">
             <header>
               <span className="section-heading__kicker">CONVERSATION MEMORY</span>
               <h2 id="memory-title">长期记忆</h2>
@@ -2332,7 +2536,7 @@ export default function Studio() {
               {memorySaving ? "保存中…" : "保存记忆配置"}
             </button>
             <p className="memory-note">记忆按对话项目分别保存，只在启用后随新消息发送给模型。</p>
-          </aside>
+          </aside> : null}
         </div>
         <NoticeToast notice={notice} />
       </main>
@@ -2345,8 +2549,8 @@ export default function Studio() {
         <button
           className="forge-brand forge-brand--button"
           type="button"
-          onClick={resetToHome}
-          disabled={accountSwitching || workspaceWriteBusy}
+          onClick={goHome}
+          disabled={accountSwitching}
         >
           <span className="atoms-logo-mark" aria-hidden="true"><UiIcon name="atom" /></span>
           <span className="forge-brand__word">Atoms</span>
@@ -2359,7 +2563,7 @@ export default function Studio() {
               ? "正在构建"
               : phase === "planning"
                 ? planningLoading ? "模型规划中" : "等待确认"
-                : "已保存"}
+                : activeVersion ? "已保存" : "等待描述"}
           </span>
         </div>
         <div className="studio-topbar__actions">
@@ -2384,113 +2588,51 @@ export default function Studio() {
             onLogout={() => void handleLogout()}
             compact
           />
-          <button
-            className="icon-button"
-            type="button"
-            onClick={resetToHome}
-            aria-label="新建应用"
-            disabled={accountSwitching || workspaceWriteBusy}
-          >
-            <UiIcon name="plus" />
-          </button>
         </div>
       </header>
 
-      <div className="studio-layout">
-        <aside className="studio-sidebar" aria-label="项目与版本">
-          <div className="sidebar-section">
-            <div className="sidebar-section__heading">
-              <span>项目</span>
-              <button
-                type="button"
-                onClick={resetToHome}
-                aria-label="创建新项目"
-                disabled={accountSwitching || workspaceWriteBusy}
-              ><UiIcon name="plus" /></button>
-            </div>
-            <div className="sidebar-projects">
-              {projects.map((project) => (
-                <div
-                  className={`sidebar-project-row${project.id === activeProject?.id ? " is-active" : ""}`}
-                  key={project.id}
-                >
-                  <button
-                    className="sidebar-project-row__open"
-                    type="button"
-                    onClick={() => void openProject(project)}
-                    aria-current={project.id === activeProject?.id ? "page" : undefined}
-                    disabled={accountSwitching || workspaceWriteBusy}
-                  >
-                    <span className="sidebar-projects__mark" aria-hidden="true">
-                      <UiIcon name={project.kind === "chat" ? "message" : "panels"} />
-                    </span>
-                    <span>{project.name}</span>
-                    <small>{project.kind === "chat" ? "对话" : "Web"}</small>
-                  </button>
-                  <button
-                    className="sidebar-project-row__delete"
-                    type="button"
-                    onClick={() => void deleteProject(project)}
-                    disabled={accountSwitching || workspaceWriteBusy}
-                    aria-label={`删除项目 ${project.name}`}
-                  ><UiIcon name="trash" /></button>
-                </div>
-              ))}
-              {!activeProject && pendingBuild ? (
-                <div className="sidebar-projects__draft">
-                  <span className="sidebar-projects__mark" aria-hidden="true"><UiIcon name="panels" /></span>
-                  <span>{workspaceName}</span>
-                  <small>草稿</small>
-                </div>
-              ) : null}
-            </div>
-          </div>
+      <div className="version-strip" aria-label="项目版本">
+        <span className="version-strip__label"><UiIcon name="history" />版本</span>
+        <div className="version-strip__list">
+          {versionsLoading ? <span className="version-strip__loading">正在读取版本…</span> : null}
+          {!versionsLoading && !versions.length ? <span className="version-strip__empty">确认方案后将生成 v1</span> : null}
+          {versions.map((version, index) => (
+            <button
+              className={version.id === activeVersion?.id ? "is-active" : ""}
+              type="button"
+              key={version.id}
+              onClick={() => chooseVersion(version)}
+              aria-current={version.id === activeVersion?.id ? "true" : undefined}
+              disabled={accountSwitching || workspaceWriteBusy}
+            >
+              <strong>v{version.ordinal}</strong>
+              <small>{index === 0 ? "当前" : "历史"}</small>
+              <time dateTime={version.createdAt ?? undefined}>{formatRelativeDate(version.createdAt)}</time>
+            </button>
+          ))}
+        </div>
+        {isHistoricalVersion ? (
+          <button
+            className="version-strip__restore"
+            type="button"
+            onClick={() => void rollbackVersion()}
+            disabled={rollbackLoading || accountSwitching}
+          >
+            {rollbackLoading ? "正在恢复…" : `恢复 v${activeVersion?.ordinal}`}
+          </button>
+        ) : (
+          <span className="version-strip__saved">
+            <span className="status-dot" />
+            {activeVersion ? "当前版本已保存" : pendingBuild ? "构建草稿已保留" : "尚未生成版本"}
+          </span>
+        )}
+      </div>
 
-          <div className="sidebar-section sidebar-section--versions">
-            <div className="sidebar-section__heading">
-              <span>版本</span>
-              <span className="sidebar-section__count">{versions.length}</span>
-            </div>
-            {versionsLoading ? (
-              <div className="version-loading" aria-label="正在载入版本" aria-busy="true">
-                <span /><span /><span />
-              </div>
-            ) : versions.length ? (
-              <div className="version-list">
-                {versions.map((version, index) => (
-                  <button
-                    className={version.id === activeVersion?.id ? "is-active" : ""}
-                    type="button"
-                    key={version.id}
-                    onClick={() => chooseVersion(version)}
-                    aria-current={version.id === activeVersion?.id ? "true" : undefined}
-                    disabled={accountSwitching || workspaceWriteBusy}
-                  >
-                    <span className="version-list__rail" aria-hidden="true">
-                      <i />
-                      {index < versions.length - 1 ? <b /> : null}
-                    </span>
-                    <span className="version-list__content">
-                      <strong>v{version.ordinal}</strong>
-                      <small>{version.instruction || (index === 0 ? "当前版本" : "历史版本")}</small>
-                      <time dateTime={version.createdAt ?? undefined}>
-                        {formatRelativeDate(version.createdAt)}
-                      </time>
-                    </span>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <p className="sidebar-empty">确认计划后，第一个版本会出现在这里。</p>
-            )}
-          </div>
-
-          <div className="sidebar-footer">
-            <span className="status-dot status-dot--live" aria-hidden="true" />
-            Runtime ready
-          </div>
-        </aside>
-
+      <div
+        className="studio-layout studio-layout--split"
+        ref={splitContainerRef}
+        style={{ gridTemplateColumns: `minmax(360px, ${agentPanePercent}%) 10px minmax(480px, 1fr)` }}
+      >
         <section className="agent-panel" aria-labelledby="agent-title">
           <header className="panel-header">
             <div>
@@ -2526,11 +2668,10 @@ export default function Studio() {
                   </div>
                 </article>
               ))}
-            </div>
 
             {phase === "planning" && pendingBuild ? (
               planningLoading ? (
-                <section className="planning-card" aria-busy="true" aria-live="polite">
+                <section className="planning-card planning-card--inline" aria-busy="true" aria-live="polite">
                   <span className="planning-card__spinner" aria-hidden="true">✦</span>
                   <div>
                     <span className="section-heading__kicker">MODEL PLANNING</span>
@@ -2547,7 +2688,7 @@ export default function Studio() {
                   </button>
                 </section>
               ) : plan ? (
-                <section className="build-plan" aria-labelledby="plan-title">
+                <section className="build-plan build-plan--inline" aria-labelledby="plan-title">
                   <div className="build-plan__header">
                     <div>
                       <span className="section-heading__kicker">MODEL BUILDPLAN</span>
@@ -2701,7 +2842,7 @@ export default function Studio() {
             ) : null}
 
             {phase === "building" ? (
-              <section className="building-card" aria-labelledby="building-title" aria-busy="true">
+              <section className="building-card building-card--inline" aria-labelledby="building-title" aria-busy="true">
                 <div className="building-card__orb" aria-hidden="true">
                   <span /><span /><i>✦</i>
                 </div>
@@ -2720,7 +2861,7 @@ export default function Studio() {
             ) : null}
 
             {phase === "ready" && activeVersion ? (
-              <section className="build-summary" aria-label="当前应用摘要">
+              <section className="build-summary build-summary--inline" aria-label="当前应用摘要">
                 <div className="build-summary__topline">
                   <span className="summary-icon" aria-hidden="true">✓</span>
                   <div>
@@ -2760,6 +2901,7 @@ export default function Studio() {
                 ) : null}
               </section>
             ) : null}
+            </div>
           </div>
 
           {phase === "ready" && activeVersion ? (
@@ -2788,6 +2930,19 @@ export default function Studio() {
             </form>
           ) : null}
         </section>
+
+        <div
+          className="workspace-resizer"
+          role="separator"
+          aria-label="调整对话与预览宽度"
+          aria-orientation="vertical"
+          aria-valuemin={32}
+          aria-valuemax={62}
+          aria-valuenow={Math.round(agentPanePercent)}
+          onPointerDown={startPaneResize}
+        >
+          <span aria-hidden="true"><i /><i /><i /></span>
+        </div>
 
         <section className="inspector-panel" aria-labelledby="inspector-title">
           <header className="inspector-header">
@@ -2926,48 +3081,49 @@ export default function Studio() {
 
 function AtomsSidebar({
   active,
+  projects,
   projectCount,
+  activeProjectId,
+  hasDraft,
+  draftName,
   user,
   sessionLoading,
   loginLoading,
   logoutLoading,
   busy,
+  workspaceBusy,
   onHome,
   onProjects,
+  onOpenProject,
+  onOpenDraft,
   onLogin,
   onLogout,
 }: {
-  active: LandingView;
+  active: "home" | "projects";
+  projects: ProjectItem[];
   projectCount: number;
+  activeProjectId: string | null;
+  hasDraft: boolean;
+  draftName: string | null;
   user: SessionUser | null;
   sessionLoading: boolean;
   loginLoading: boolean;
   logoutLoading: boolean;
   busy: boolean;
+  workspaceBusy: boolean;
   onHome: () => void;
   onProjects: () => void;
+  onOpenProject: (project: ProjectItem) => void;
+  onOpenDraft: () => void;
   onLogin: () => void;
   onLogout: () => void;
 }) {
-  const workspaceLabel = user?.name || user?.login || "Chance";
-
   return (
     <aside className="atoms-sidebar" aria-label="主导航">
       <div className="atoms-sidebar__brand">
         <span className="atoms-logo-mark" aria-hidden="true"><UiIcon name="atom" /></span>
         <strong>Atoms</strong>
         <span>Demo</span>
-      </div>
-
-      <div className="atoms-workspace">
-        <span className="atoms-workspace__avatar" aria-hidden="true">
-          {Array.from(workspaceLabel.trim())[0]?.toUpperCase() || "C"}
-        </span>
-        <span>
-          <strong>{workspaceLabel} 的工作区</strong>
-          <small>{user ? `@${user.login}` : "本地访客空间"}</small>
-        </span>
-        <UiIcon name="chevron-down" />
       </div>
 
       <nav className="atoms-nav">
@@ -2978,7 +3134,7 @@ function AtomsSidebar({
           onClick={onHome}
           disabled={busy}
         >
-          <span><UiIcon name="home" /></span>
+          <span className="atoms-nav__icon atoms-nav__icon--home"><UiIcon name="home" /></span>
           首页
         </button>
         <button
@@ -2988,27 +3144,48 @@ function AtomsSidebar({
           onClick={onProjects}
           disabled={busy}
         >
-          <span><UiIcon name="folder" /></span>
+          <span className="atoms-nav__icon atoms-nav__icon--projects"><UiIcon name="folder" /></span>
           我的项目
           <small>{projectCount}</small>
         </button>
       </nav>
 
-      <div className="atoms-sidebar__section-label">创作能力</div>
-      <div className="atoms-sidebar__capabilities">
-        <span><UiIcon name="message" /><small>对话</small></span>
-        <span><UiIcon name="panels" /><small>Web App</small></span>
+      <div className="atoms-sidebar__section-label">
+        <span>最近项目</span>
+        <small>最近 5 个</small>
       </div>
-
-      <div className="atoms-sidebar__guide">
-        <span><UiIcon name="sparkles" /></span>
-        <div>
-          <strong>从一个想法开始</strong>
-          <p>让 Agent 帮你持续讨论，或生成可运行的 Web App。</p>
-        </div>
-        <button type="button" onClick={onHome} disabled={busy} aria-label="开始创作">
-          <UiIcon name="arrow-right" />
-        </button>
+      <div className="atoms-sidebar__recent">
+        {hasDraft ? (
+          <button type="button" className="is-draft" onClick={onOpenDraft} disabled={busy}>
+            <span className="atoms-recent-icon atoms-recent-icon--web"><UiIcon name="panels" /></span>
+            <span><strong>{draftName || "未命名 Web App"}</strong><small>构建草稿 · 点击继续</small></span>
+            <i className="atoms-recent-live" aria-label="进行中" />
+          </button>
+        ) : null}
+        {projects.map((project) => (
+          <button
+            type="button"
+            key={project.id}
+            onClick={() => onOpenProject(project)}
+            disabled={busy || (workspaceBusy && project.id !== activeProjectId)}
+          >
+            <span className={`atoms-recent-icon atoms-recent-icon--${project.kind === "chat" ? "chat" : "web"}`}>
+              <UiIcon name={project.kind === "chat" ? "message" : "panels"} />
+            </span>
+            <span>
+              <strong>{project.name}</strong>
+              <small>{project.currentVersion === 0 && project.kind === "web_app" ? "构建草稿" : project.kind === "chat" ? "对话" : `Web App · v${project.currentVersion}`}</small>
+            </span>
+            <UiIcon name="arrow-right" />
+          </button>
+        ))}
+        {!hasDraft && !projects.length ? (
+          <button type="button" className="atoms-sidebar__recent-empty" onClick={onHome} disabled={busy}>
+            <span className="atoms-recent-icon atoms-recent-icon--empty"><UiIcon name="sparkles" /></span>
+            <span><strong>还没有项目</strong><small>从首页输入一个想法开始</small></span>
+            <UiIcon name="arrow-right" />
+          </button>
+        ) : null}
       </div>
 
       <div className="atoms-sidebar__bottom">
@@ -3021,7 +3198,6 @@ function AtomsSidebar({
           onLogout={onLogout}
           compact
         />
-        <span className="atoms-sidebar__status"><i aria-hidden="true" />工作区已连接</span>
       </div>
     </aside>
   );
