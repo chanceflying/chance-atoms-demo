@@ -1899,6 +1899,12 @@ export default function Studio({
         confirmedPlan,
         confirmedReasoningSummary,
       );
+      const completedUpdateSummary = build.kind === "refine"
+        ? summarizeInitialProjectTitle(
+            build.instruction ?? confirmedPlan.requestSummary,
+            cleanProjectTitle(confirmedPlan.title, "本次调整"),
+          )
+        : null;
       if (failedBuildTaskRef.current?.projectId === project.id) {
         storeFailedBuildTask(null);
       }
@@ -1940,7 +1946,7 @@ export default function Studio({
             text:
               build.kind === "new"
                 ? `「${project.name}」已经生成。右侧是本次生成的完整 Web App，可以直接操作。`
-                : `调整完成，已保存为 v${version.ordinal}。旧版本仍在左侧，可以随时查看或恢复。`,
+                : `已完成「${completedUpdateSummary}」，并保存为 v${version.ordinal}。旧版本仍在左侧，可以随时查看或恢复。`,
             meta: `${providerLabel(generated.provider)} 生成`,
           },
         ]);

@@ -5003,6 +5003,18 @@ select:focus-visible {
   font-size: 11px;
 }
 
+.planning-card--inline h2 {
+  font-size: 18px;
+}
+
+.planning-card--inline p {
+  font-size: 12px;
+}
+
+.planning-card--inline .section-heading__kicker {
+  font-size: 9px;
+}
+
 .building-card--inline .building-log {
   max-width: 460px;
 }
