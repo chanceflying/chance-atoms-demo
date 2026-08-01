@@ -255,30 +255,127 @@ test("chat route rejects a non-text memory configuration", async () => {
 });
 
 test("chat route sends history and configured memory to OpenAI", async () => {
-  await withMockOpenAI({ output_text: "我们继续整理项目经历。" }, async (requestBodies) => {
-    const response = await chat(
-      jsonRequest("http://localhost/api/chat", {
-        message: "继续",
-        history: [
-          { role: "user", content: "我在准备面试" },
-          { role: "assistant", content: "我们可以先整理项目经历" },
-        ],
-        memory: "用户偏好简洁的中文回答。",
+  await withMockOpenAI(
+    {
+      output_text: JSON.stringify({
+        reply: "我们继续整理项目经历。",
+        title: "面试项目经历整理",
       }),
-    );
-    const responseBody = (await response.json()) as Record<string, unknown>;
-    const requestBody = requestBodies[0] as {
-      input: Array<{ role: string; content: string }>;
-    };
+    },
+    async (requestBodies) => {
+      const response = await chat(
+        jsonRequest("http://localhost/api/chat", {
+          message: "继续",
+          history: [
+            { role: "user", content: "我在准备面试" },
+            { role: "assistant", content: "我们可以先整理项目经历" },
+          ],
+          memory: "用户偏好简洁的中文回答。",
+        }),
+      );
+      const responseBody = (await response.json()) as Record<string, unknown>;
+      const requestBody = requestBodies[0] as {
+        input: Array<{ role: string; content: string }>;
+        text: {
+          format: {
+            type: string;
+            name: string;
+            strict: boolean;
+            schema: { required: string[] };
+          };
+        };
+      };
 
-    assert.equal(response.status, 200);
-    assert.equal(responseBody.reply, "我们继续整理项目经历。");
-    assert.equal(responseBody.provider, "openai");
-    assert.match(requestBody.input[0].content, /用户偏好简洁的中文回答/);
-    assert.deepEqual(requestBody.input.slice(1), [
-      { role: "user", content: "我在准备面试" },
-      { role: "assistant", content: "我们可以先整理项目经历" },
-      { role: "user", content: "继续" },
-    ]);
-  });
+      assert.equal(response.status, 200);
+      assert.equal(responseBody.reply, "我们继续整理项目经历。");
+      assert.equal(responseBody.title, "面试项目经历整理");
+      assert.equal(responseBody.provider, "openai");
+      assert.equal(requestBody.text.format.type, "json_schema");
+      assert.equal(requestBody.text.format.name, "chance_chat_response");
+      assert.equal(requestBody.text.format.strict, true);
+      assert.deepEqual(requestBody.text.format.schema.required, ["reply", "title"]);
+      assert.match(requestBody.input[0].content, /用户偏好简洁的中文回答/);
+      assert.match(requestBody.input[0].content, /semantic summary/);
+      assert.deepEqual(requestBody.input.slice(1), [
+        { role: "user", content: "我在准备面试" },
+        { role: "assistant", content: "我们可以先整理项目经历" },
+        { role: "user", content: "继续" },
+      ]);
+    },
+  );
+});
+
+test("chat route keeps the reply and normalizes a title copied from the first message", async () => {
+  await withMockOpenAI(
+    {
+      output_text: JSON.stringify({
+        reply: "可以，我们先整理项目背景。",
+        title: "我在准备面试",
+      }),
+    },
+    async () => {
+      const response = await chat(
+        jsonRequest("http://localhost/api/chat", {
+          message: "继续",
+          history: [{ role: "user", content: "我在准备面试" }],
+          memory: "",
+        }),
+      );
+      const responseBody = (await response.json()) as Record<string, unknown>;
+
+      assert.equal(response.status, 200);
+      assert.equal(responseBody.reply, "可以，我们先整理项目背景。");
+      assert.equal(responseBody.title, "面试准备");
+      assert.doesNotMatch(String(responseBody.title), /主题讨论|discussion/i);
+    },
+  );
+});
+
+test("chat route falls back to a deterministic summary without failing the reply", async () => {
+  await withMockOpenAI(
+    {
+      output_text: JSON.stringify({
+        reply: "可以，我会先确定页面结构。",
+      }),
+    },
+    async () => {
+      const response = await chat(
+        jsonRequest("http://localhost/api/chat", {
+          message: "请帮我设计一个登录页面",
+          history: [],
+          memory: "",
+        }),
+      );
+      const responseBody = (await response.json()) as Record<string, unknown>;
+
+      assert.equal(response.status, 200);
+      assert.equal(responseBody.reply, "可以，我会先确定页面结构。");
+      assert.equal(responseBody.title, "登录页面");
+    },
+  );
+});
+
+test("chat route uses 新对话 when no title can be summarized reliably", async () => {
+  await withMockOpenAI(
+    {
+      output_text: JSON.stringify({
+        reply: "你好，有什么想聊的？",
+        title: "你好",
+      }),
+    },
+    async () => {
+      const response = await chat(
+        jsonRequest("http://localhost/api/chat", {
+          message: "你好",
+          history: [],
+          memory: "",
+        }),
+      );
+      const responseBody = (await response.json()) as Record<string, unknown>;
+
+      assert.equal(response.status, 200);
+      assert.equal(responseBody.reply, "你好，有什么想聊的？");
+      assert.equal(responseBody.title, "新对话");
+    },
+  );
 });

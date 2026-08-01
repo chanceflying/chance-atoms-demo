@@ -3,12 +3,17 @@
   "title": "Chance Atoms Chat Response",
   "type": "object",
   "additionalProperties": false,
-  "required": ["reply"],
+  "required": ["reply", "title"],
   "properties": {
     "reply": {
       "type": "string",
       "minLength": 1,
       "maxLength": 20000
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 48
     }
   }
 }

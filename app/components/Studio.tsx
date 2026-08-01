@@ -25,7 +25,6 @@ import UiIcon from "./UiIcon";
 type StudioPhase = "home" | "planning" | "building" | "ready";
 type LandingView = "home" | "projects" | "project";
 type InspectorTab = "preview" | "code" | "spec";
-type PreviewSize = "desktop" | "mobile";
 type RetryAction = "projects" | "versions" | "plan" | "build" | "rollback" | null;
 type ProjectKind = "web_app" | "chat";
 type ProjectFilter = "all" | ProjectKind;
@@ -63,6 +62,7 @@ type ChatMemory = {
 
 type ChatResponse = {
   reply: string;
+  title: string | null;
   provider: string | null;
   model: string | null;
 };
@@ -89,6 +89,33 @@ type PendingBuild = {
   prompt: string;
   instruction?: string;
   previousArtifact?: StoredArtifact;
+};
+
+type BackgroundPlanTask = {
+  requestId: number;
+  projectId: string | null;
+  build: PendingBuild;
+  plan: BuildPlan | null;
+  reasoningSummary: string[];
+  provider: string | null;
+  model: string | null;
+  loading: boolean;
+  error: string | null;
+};
+
+type FailedBuildTask = {
+  projectId: string;
+  build: PendingBuild;
+  plan: BuildPlan;
+  reasoningSummary: string[];
+  error: string;
+};
+
+type FailedChatTask = {
+  projectId: string;
+  userMessage: ChatMessage;
+  userPersisted: boolean;
+  error: string;
 };
 
 type ConversationMessage = {
@@ -379,6 +406,7 @@ function parseChatResponse(payload: unknown): ChatResponse {
   if (!reply) throw new Error("模型没有返回对话内容，请重试。");
   return {
     reply,
+    title: readNullableString(payload.title),
     provider: readNullableString(payload.provider),
     model: readNullableString(payload.model),
   };
@@ -459,16 +487,12 @@ function getArtifactDescription(artifact: StoredArtifact): string {
   return readString(row.description ?? row.subtitle);
 }
 
-function deriveProjectName(prompt: string, artifact?: StoredArtifact): string {
-  if (artifact) {
-    const artifactTitle = getArtifactTitle(artifact, "");
-    if (artifactTitle) return artifactTitle.slice(0, 32);
-  }
-  const clean = prompt
-    .replace(/[，。！？、,.!?]/g, " ")
-    .replace(/^(请|帮我|给我|做一个|创建一个|生成一个)+/g, "")
+function cleanProjectTitle(value: string, fallback: string): string {
+  const clean = value
+    .replace(/^["'“”‘’]+|["'“”‘’]+$/g, "")
+    .replace(/\s+/g, " ")
     .trim();
-  return (clean.split(/\s+/).slice(0, 5).join(" ") || "我的新应用").slice(0, 32);
+  return (clean || fallback).slice(0, 48);
 }
 
 function providerLabel(provider: string | null): string {
@@ -676,6 +700,48 @@ function safeCompile(
   }
 }
 
+function createPreviewSrcDoc(html: string): string {
+  if (!html) return "";
+  const fitScript = `
+<script data-atoms-preview-fit>
+(() => {
+  const fitPage = () => {
+    const root = document.documentElement;
+    const body = document.body;
+    if (!root || !body) return;
+    body.style.setProperty("transform", "none", "important");
+    body.style.setProperty("transform-origin", "top left", "important");
+    root.style.setProperty("overflow", "hidden", "important");
+    body.style.setProperty("overflow", "visible", "important");
+    const naturalWidth = Math.max(root.scrollWidth, body.scrollWidth, 1);
+    const naturalHeight = Math.max(root.scrollHeight, body.scrollHeight, 1);
+    const scale = Math.min(
+      1,
+      Math.max(window.innerWidth, 1) / naturalWidth,
+      Math.max(window.innerHeight, 1) / naturalHeight
+    );
+    const offsetX = Math.max((window.innerWidth - naturalWidth * scale) / 2, 0);
+    body.style.setProperty(
+      "transform",
+      \`translateX(\${offsetX}px) scale(\${scale})\`,
+      "important"
+    );
+  };
+  const scheduleFit = () => requestAnimationFrame(() => requestAnimationFrame(fitPage));
+  window.addEventListener("load", scheduleFit);
+  window.addEventListener("resize", scheduleFit);
+  if ("ResizeObserver" in window && document.body) {
+    new ResizeObserver(scheduleFit).observe(document.body);
+  }
+  scheduleFit();
+  window.setTimeout(fitPage, 250);
+})();
+</script>`;
+  return /<\/body>/i.test(html)
+    ? html.replace(/<\/body>/i, `${fitScript}</body>`)
+    : `${html}${fitScript}`;
+}
+
 export default function Studio({
   initialView = "home",
   initialProjectId,
@@ -707,7 +773,6 @@ export default function Studio({
   const [buildLog, setBuildLog] = useState<string[]>([]);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("preview");
-  const [previewSize, setPreviewSize] = useState<PreviewSize>("desktop");
   const [rollbackLoading, setRollbackLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -727,9 +792,18 @@ export default function Studio({
   const [memoryPanelOpen, setMemoryPanelOpen] = useState(true);
   const [versionPanelOpen, setVersionPanelOpen] = useState(true);
   const [agentPanePercent, setAgentPanePercent] = useState(42);
+  const [backgroundPlanTask, setBackgroundPlanTask] = useState<BackgroundPlanTask | null>(null);
+  const [backgroundBuildProjectId, setBackgroundBuildProjectId] = useState<string | null>(null);
+  const [backgroundChatProjectId, setBackgroundChatProjectId] = useState<string | null>(null);
 
-  const iframeRef = useRef<HTMLIFrameElement>(null);
   const splitContainerRef = useRef<HTMLDivElement>(null);
+  const activeProjectIdRef = useRef<string | null>(null);
+  const activeVersionIdRef = useRef<string | null>(null);
+  const backgroundPlanTaskRef = useRef<BackgroundPlanTask | null>(null);
+  const backgroundBuildProjectIdRef = useRef<string | null>(null);
+  const backgroundChatProjectIdRef = useRef<string | null>(null);
+  const failedBuildTaskRef = useRef<FailedBuildTask | null>(null);
+  const failedChatTaskRef = useRef<FailedChatTask | null>(null);
   const initialProjectOpenedRef = useRef(false);
   const accountSwitchingRef = useRef(false);
   const mutationInFlightRef = useRef(false);
@@ -765,13 +839,7 @@ export default function Studio({
     [projects],
   );
 
-  const recentProjects = useMemo(() => {
-    if (!workspaceWriteBusy || !activeProject) return sortedProjects.slice(0, 5);
-    return [
-      activeProject,
-      ...sortedProjects.filter((project) => project.id !== activeProject.id),
-    ].slice(0, 5);
-  }, [activeProject, sortedProjects, workspaceWriteBusy]);
+  const recentProjects = useMemo(() => sortedProjects.slice(0, 5), [sortedProjects]);
   const filteredProjects = useMemo(
     () => projectFilter === "all"
       ? sortedProjects
@@ -780,6 +848,29 @@ export default function Studio({
   );
 
   const workspaceOwner = user?.email?.split("@")[0]?.trim() || user?.login || "游客";
+  const draftPlanTask = backgroundPlanTask?.projectId === null ? backgroundPlanTask : null;
+  const hasDraft = Boolean(draftPlanTask || (pendingBuild && !activeProject));
+  const draftName = cleanProjectTitle(
+    draftPlanTask?.plan?.title ?? plan?.title ?? "",
+    "新 Web App",
+  );
+  const runningProjectIds = useMemo(
+    () => [
+      backgroundPlanTask?.loading ? backgroundPlanTask.projectId : null,
+      backgroundBuildProjectId,
+      backgroundChatProjectId,
+    ]
+      .filter((id): id is string => Boolean(id)),
+    [backgroundBuildProjectId, backgroundChatProjectId, backgroundPlanTask],
+  );
+
+  useEffect(() => {
+    activeProjectIdRef.current = activeProject?.id ?? null;
+  }, [activeProject?.id]);
+
+  useEffect(() => {
+    activeVersionIdRef.current = activeVersionId;
+  }, [activeVersionId]);
 
   const updatePath = useCallback((path: string, replace = false) => {
     if (typeof window === "undefined" || window.location.pathname === path) return;
@@ -823,11 +914,25 @@ export default function Studio({
     () => safeCompile(activeVersion?.artifact ?? null, records, activeProject?.id ?? "draft"),
     [activeProject?.id, activeVersion?.artifact, records],
   );
+  const previewSrcDoc = useMemo(() => createPreviewSrcDoc(previewHtml), [previewHtml]);
 
   const showNotice = useCallback((text: string, tone: Notice["tone"] = "success") => {
     if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
     setNotice({ text, tone });
     noticeTimerRef.current = setTimeout(() => setNotice(null), 3600);
+  }, []);
+
+  const storeBackgroundPlanTask = useCallback((task: BackgroundPlanTask | null) => {
+    backgroundPlanTaskRef.current = task;
+    setBackgroundPlanTask(task);
+  }, []);
+
+  const storeFailedBuildTask = useCallback((task: FailedBuildTask | null) => {
+    failedBuildTaskRef.current = task;
+  }, []);
+
+  const storeFailedChatTask = useCallback((task: FailedChatTask | null) => {
+    failedChatTaskRef.current = task;
   }, []);
 
   const loadSession = useCallback(async () => {
@@ -918,42 +1023,56 @@ export default function Studio({
     project: ProjectItem,
     options?: { updateUrl?: boolean },
   ) => {
-    if (
-      mutationInFlightRef.current
-      || chatSendInFlightRef.current
-      || chatCreateInFlightRef.current
-    ) {
-      showNotice("请等待当前写入完成后再切换项目", "error");
-      return;
-    }
+    const projectIsBuilding = backgroundBuildProjectIdRef.current === project.id;
+    const projectIsReplying = backgroundChatProjectIdRef.current === project.id;
+    const projectPlanTask = backgroundPlanTaskRef.current?.projectId === project.id
+      ? backgroundPlanTaskRef.current
+      : null;
+    const projectFailedBuild = failedBuildTaskRef.current?.projectId === project.id
+      ? failedBuildTaskRef.current
+      : null;
+    const projectFailedChat = failedChatTaskRef.current?.projectId === project.id
+      ? failedChatTaskRef.current
+      : null;
     const identityEpoch = identityEpochRef.current;
     const requestId = openProjectRequestRef.current + 1;
     openProjectRequestRef.current = requestId;
-    planRequestRef.current += 1;
     workspaceEpochRef.current += 1;
     chatRequestRef.current += 1;
-    chatSendInFlightRef.current = false;
     setLandingView("project");
     if (options?.updateUrl !== false) {
       updatePath(`/${project.kind === "chat" ? "chat" : "apps"}/${encodeURIComponent(project.id)}`);
     }
+    activeProjectIdRef.current = project.id;
     setActiveProject(project);
     setVersions([]);
+    activeVersionIdRef.current = null;
     setActiveVersionId(null);
     setRecords([]);
-    setPendingBuild(null);
-    setPlan(null);
-    setReasoningSummary([]);
-    setPlanProvider(null);
-    setPlanModel(null);
+    setPendingBuild(projectPlanTask?.build ?? projectFailedBuild?.build ?? null);
+    setPlan(projectPlanTask?.plan ?? projectFailedBuild?.plan ?? null);
+    setReasoningSummary(
+      projectPlanTask?.reasoningSummary
+      ?? projectFailedBuild?.reasoningSummary
+      ?? [],
+    );
+    setPlanProvider(projectPlanTask?.provider ?? null);
+    setPlanModel(projectPlanTask?.model ?? null);
     setPlanFeedback("");
-    setPlanningLoading(false);
-    setBuildLog([]);
-    setPhase("ready");
-    setErrorMessage(null);
+    setPlanningLoading(projectPlanTask?.loading ?? false);
+    setBuildLog(projectIsBuilding
+      ? ["任务正在后台执行", "完成后会自动保存为新版本"]
+      : []);
+    setPhase(projectIsBuilding
+      ? "building"
+      : projectPlanTask || projectFailedBuild
+        ? "planning"
+        : "ready");
+    setErrorMessage(projectFailedBuild?.error ?? projectPlanTask?.error ?? projectFailedChat?.error ?? null);
+    setRetryAction(projectFailedBuild ? "build" : projectPlanTask?.error ? "plan" : null);
     setChatMessages([]);
-    setChatInput("");
-    setChatSending(false);
+    setChatInput(projectFailedChat?.userMessage.content ?? "");
+    setChatSending(projectIsReplying);
     setChatMemory({ enabled: false, content: "" });
     setChatLoading(project.kind === "chat");
     setVersionsLoading(project.kind === "web_app");
@@ -973,12 +1092,20 @@ export default function Studio({
           enabled: memory.enabled === true,
           content: readString(memory.content),
         });
-        setChatMessages(
-          (Array.isArray(row.messages) ? row.messages : [])
-            .map(normalizeChatMessage)
-            .filter((item): item is ChatMessage => Boolean(item)),
-        );
-        setRetryAction(null);
+        const loadedMessages = (Array.isArray(row.messages) ? row.messages : [])
+          .map(normalizeChatMessage)
+          .filter((item): item is ChatMessage => Boolean(item));
+        setChatMessages((current) => {
+          const merged = new Map<string, ChatMessage>();
+          for (const message of loadedMessages) merged.set(message.id, message);
+          for (const message of current) merged.set(message.id, message);
+          return [...merged.values()].sort((left, right) => {
+            const leftTime = Date.parse(left.createdAt ?? "") || 0;
+            const rightTime = Date.parse(right.createdAt ?? "") || 0;
+            return leftTime - rightTime;
+          });
+        });
+        if (!projectFailedChat) setRetryAction(null);
       } catch (error) {
         if (
           identityEpoch !== identityEpochRef.current
@@ -999,7 +1126,15 @@ export default function Studio({
       {
         id: makeId("message"),
         role: "agent",
-        text: `已打开「${project.name}」。你可以直接操作预览，或者告诉我下一步要怎么调整。`,
+        text: projectIsBuilding
+          ? `「${project.name}」仍在后台构建。你可以继续查看当前版本，完成后结果会自动保存。`
+          : projectPlanTask?.loading
+            ? `「${project.name}」仍在后台生成方案。你可以查看当前版本，方案完成后再回来确认。`
+            : projectPlanTask?.plan
+              ? `「${project.name}」的调整方案已经准备好，可以继续修改或确认构建。`
+              : projectFailedBuild
+                ? "上次构建没有完成，方案和输入已保留，可以直接重试。"
+          : `已打开「${project.name}」。你可以直接操作预览，或者告诉我下一步要怎么调整。`,
       },
     ]);
     try {
@@ -1016,13 +1151,21 @@ export default function Studio({
         .filter((item): item is VersionItem => Boolean(item));
       const sorted = sortVersions(normalized);
       const firstVersion = sorted[0];
-      setVersions(sorted);
-      setActiveVersionId(firstVersion?.id ?? null);
-      setRecords(firstVersion?.records ?? []);
-      if (!sorted.length) {
+      setVersions((current) => {
+        const merged = new Map<string, VersionItem>();
+        for (const version of sorted) merged.set(version.id, version);
+        for (const version of current) merged.set(version.id, version);
+        return sortVersions([...merged.values()]);
+      });
+      if (!activeVersionIdRef.current) {
+        activeVersionIdRef.current = firstVersion?.id ?? null;
+        setActiveVersionId(firstVersion?.id ?? null);
+        setRecords(firstVersion?.records ?? []);
+      }
+      if (!sorted.length && !projectIsBuilding && !projectPlanTask && !projectFailedBuild) {
         setErrorMessage("这个项目还没有可预览的版本。可以返回首页重新创建。 ");
       }
-      setRetryAction(null);
+      if (!projectFailedBuild && !projectPlanTask?.error) setRetryAction(null);
     } catch (error) {
       if (
         identityEpoch !== identityEpochRef.current
@@ -1038,7 +1181,7 @@ export default function Studio({
         setVersionsLoading(false);
       }
     }
-  }, [showNotice, updatePath]);
+  }, [updatePath]);
 
   const openOrResumeProject = useCallback((project: ProjectItem) => {
     if (activeProject?.id === project.id) {
@@ -1079,43 +1222,17 @@ export default function Studio({
     projectsLoading,
   ]);
 
-  useEffect(() => {
-    const handlePopState = () => {
-      const path = window.location.pathname;
-      if (path === "/") {
-        setLandingView("home");
-        return;
-      }
-      if (path === "/projects") {
-        setLandingView("projects");
-        return;
-      }
-      if (path === "/apps/draft" && pendingBuild) {
-        setLandingView("project");
-        return;
-      }
-      const match = path.match(/^\/(chat|apps)\/([^/]+)$/);
-      if (!match) return;
-      const project = projects.find((item) => item.id === decodeURIComponent(match[2]));
-      if (!project) return;
-      if (activeProject?.id === project.id) setLandingView("project");
-      else void openProject(project, { updateUrl: false });
-    };
-    window.addEventListener("popstate", handlePopState);
-    return () => window.removeEventListener("popstate", handlePopState);
-  }, [activeProject?.id, openProject, pendingBuild, projects]);
-
   const resetToHome = useCallback(() => {
     openProjectRequestRef.current += 1;
-    planRequestRef.current += 1;
     workspaceEpochRef.current += 1;
     chatRequestRef.current += 1;
-    chatSendInFlightRef.current = false;
     setPhase("home");
     setLandingView("home");
     setVersionsLoading(false);
+    activeProjectIdRef.current = null;
     setActiveProject(null);
     setVersions([]);
+    activeVersionIdRef.current = null;
     setActiveVersionId(null);
     setRecords([]);
     setPendingBuild(null);
@@ -1138,32 +1255,126 @@ export default function Studio({
     updatePath("/");
   }, [updatePath]);
 
+  const resumeDraft = useCallback(() => {
+    const task = backgroundPlanTaskRef.current;
+    if (!task || task.projectId !== null) {
+      resumeWorkspace();
+      return;
+    }
+    openProjectRequestRef.current += 1;
+    workspaceEpochRef.current += 1;
+    activeProjectIdRef.current = null;
+    setActiveProject(null);
+    setVersions([]);
+    activeVersionIdRef.current = null;
+    setActiveVersionId(null);
+    setRecords([]);
+    setPendingBuild(task.build);
+    setPlan(task.plan);
+    setReasoningSummary(task.reasoningSummary);
+    setPlanProvider(task.provider);
+    setPlanModel(task.model);
+    setPlanFeedback("");
+    setPlanningLoading(task.loading);
+    setBuildLog([]);
+    setMessages([
+      { id: makeId("message"), role: "user", text: task.build.prompt },
+      {
+        id: makeId("message"),
+        role: "agent",
+        text: task.loading
+          ? "方案仍在后台生成，你可以留在这里等待，也可以继续查看其他项目。"
+          : task.error
+            ? "方案生成没有完成，输入已经保留，可以直接重试。"
+            : "需求分析和 BuildPlan 已完成，请检查后继续调整或确认构建。",
+        meta: task.loading
+          ? "正在规划"
+          : task.error
+            ? "规划失败"
+            : `${providerLabel(task.provider)} · 等待确认`,
+      },
+    ]);
+    setErrorMessage(task.error);
+    setRetryAction(task.error ? "plan" : null);
+    setPhase("planning");
+    setLandingView("project");
+    updatePath("/apps/draft");
+  }, [resumeWorkspace, updatePath]);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const path = window.location.pathname;
+      if (path === "/") {
+        setLandingView("home");
+        return;
+      }
+      if (path === "/projects") {
+        setLandingView("projects");
+        return;
+      }
+      if (path === "/apps/draft" && (pendingBuild || backgroundPlanTaskRef.current?.projectId === null)) {
+        resumeDraft();
+        return;
+      }
+      const match = path.match(/^\/(chat|apps)\/([^/]+)$/);
+      if (!match) return;
+      const project = projects.find((item) => item.id === decodeURIComponent(match[2]));
+      if (!project) return;
+      if (activeProject?.id === project.id) setLandingView("project");
+      else void openProject(project, { updateUrl: false });
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [activeProject?.id, openProject, pendingBuild, projects, resumeDraft]);
+
   const requestBuildPlan = useCallback(async (
     build: PendingBuild,
     revision?: { currentPlan: BuildPlan; feedback: string },
+    targetProjectId: string | null = null,
   ) => {
     const requestId = planRequestRef.current + 1;
     planRequestRef.current = requestId;
-    setPlanningLoading(true);
-    if (!revision) {
-      setPlan(null);
-      setReasoningSummary([]);
-      setPlanProvider(null);
-      setPlanModel(null);
+    const previousTask = backgroundPlanTaskRef.current?.projectId === targetProjectId
+      ? backgroundPlanTaskRef.current
+      : null;
+    const task: BackgroundPlanTask = {
+      requestId,
+      projectId: targetProjectId,
+      build,
+      plan: revision?.currentPlan ?? previousTask?.plan ?? null,
+      reasoningSummary: previousTask?.reasoningSummary ?? [],
+      provider: previousTask?.provider ?? null,
+      model: previousTask?.model ?? null,
+      loading: true,
+      error: null,
+    };
+    storeBackgroundPlanTask(task);
+    const isPlanWorkspaceActive = () => targetProjectId
+      ? activeProjectIdRef.current === targetProjectId
+      : activeProjectIdRef.current === null && window.location.pathname === "/apps/draft";
+
+    if (isPlanWorkspaceActive()) {
+      setPlanningLoading(true);
+      if (!revision) {
+        setPlan(null);
+        setReasoningSummary([]);
+        setPlanProvider(null);
+        setPlanModel(null);
+      }
+      setErrorMessage(null);
+      setRetryAction(null);
+      setMessages((current) =>
+        current.map((message) =>
+          message.meta === "规划失败"
+            ? {
+                ...message,
+                text: "正在重新调用模型生成 BuildPlan。",
+                meta: "正在规划",
+              }
+            : message,
+        ),
+      );
     }
-    setErrorMessage(null);
-    setRetryAction(null);
-    setMessages((current) =>
-      current.map((message) =>
-        message.meta === "规划失败"
-          ? {
-              ...message,
-              text: "正在重新调用模型生成 BuildPlan。",
-              meta: "正在规划",
-            }
-          : message,
-      ),
-    );
 
     try {
       let planned: PlanResponse;
@@ -1204,50 +1415,72 @@ export default function Studio({
       }
 
       if (requestId !== planRequestRef.current) return;
-      setPlan(planned.plan);
-      setReasoningSummary(planned.reasoningSummary);
-      setPlanProvider(planned.provider);
-      setPlanModel(planned.model);
-      setPlanFeedback("");
-      setMessages((current) =>
-        revision
-          ? [
-              ...current,
-              {
-                id: makeId("message"),
-                role: "agent",
-                text: "已经根据你的反馈调整 BuildPlan。你可以继续修改，或确认后开始构建。",
-                meta: `${providerLabel(planned.provider)} · 等待确认`,
-              },
-            ]
-          : current.map((message) =>
-              message.meta === "正在规划"
-                ? {
-                    ...message,
-                    text: "模型已经完成需求分析。请检查下面的 BuildPlan，确认后才会开始生成代码。",
-                    meta: `${providerLabel(planned.provider)} · 等待确认`,
-                  }
-                : message,
-            ),
-      );
+      const completedTask: BackgroundPlanTask = {
+        ...task,
+        plan: planned.plan,
+        reasoningSummary: planned.reasoningSummary,
+        provider: planned.provider,
+        model: planned.model,
+        loading: false,
+        error: null,
+      };
+      storeBackgroundPlanTask(completedTask);
+      if (isPlanWorkspaceActive()) {
+        setPlan(planned.plan);
+        setReasoningSummary(planned.reasoningSummary);
+        setPlanProvider(planned.provider);
+        setPlanModel(planned.model);
+        setPlanFeedback("");
+        setMessages((current) =>
+          revision
+            ? [
+                ...current,
+                {
+                  id: makeId("message"),
+                  role: "agent",
+                  text: "已经根据你的反馈调整 BuildPlan。你可以继续修改，或确认后开始构建。",
+                  meta: `${providerLabel(planned.provider)} · 等待确认`,
+                },
+              ]
+            : current.map((message) =>
+                message.meta === "正在规划"
+                  ? {
+                      ...message,
+                      text: "模型已经完成需求分析。请检查下面的 BuildPlan，确认后才会开始生成代码。",
+                      meta: `${providerLabel(planned.provider)} · 等待确认`,
+                    }
+                  : message,
+              ),
+        );
+      }
     } catch (error) {
       if (requestId !== planRequestRef.current) return;
-      setErrorMessage(getErrorMessage(error, "规划过程中出现问题，请重试。"));
-      setRetryAction("plan");
-      setMessages((current) =>
-        current.map((message) =>
-          message.meta === "正在规划"
-            ? { ...message, text: "规划请求没有完成。可以直接重试。", meta: "规划失败" }
-            : message,
-        ),
-      );
+      const errorText = getErrorMessage(error, "规划过程中出现问题，请重试。");
+      storeBackgroundPlanTask({ ...task, loading: false, error: errorText });
+      if (isPlanWorkspaceActive()) {
+        setErrorMessage(errorText);
+        setRetryAction("plan");
+        setMessages((current) =>
+          current.map((message) =>
+            message.meta === "正在规划"
+              ? { ...message, text: "规划请求没有完成。可以直接重试。", meta: "规划失败" }
+              : message,
+          ),
+        );
+      }
     } finally {
-      if (requestId === planRequestRef.current) setPlanningLoading(false);
+      if (requestId === planRequestRef.current && isPlanWorkspaceActive()) {
+        setPlanningLoading(false);
+      }
     }
-  }, []);
+  }, [storeBackgroundPlanTask]);
 
   const beginNewPlan = useCallback(() => {
     if (accountSwitchingRef.current) return;
+    if (backgroundPlanTaskRef.current) {
+      showNotice("已有 Web App 方案草稿，请先从最近项目继续或取消", "error");
+      return;
+    }
     const cleanPrompt = prompt.trim();
     if (cleanPrompt.length < 4) {
       setErrorMessage("再多描述一点吧，例如玩法、交互和完成条件。 ");
@@ -1260,8 +1493,10 @@ export default function Studio({
     };
     openProjectRequestRef.current += 1;
     workspaceEpochRef.current += 1;
+    activeProjectIdRef.current = null;
     setActiveProject(null);
     setVersions([]);
+    activeVersionIdRef.current = null;
     setActiveVersionId(null);
     setRecords([]);
     setPendingBuild(build);
@@ -1280,11 +1515,18 @@ export default function Studio({
     setPhase("planning");
     setLandingView("project");
     updatePath("/apps/draft");
-    void requestBuildPlan(build);
-  }, [prompt, requestBuildPlan, updatePath]);
+    void requestBuildPlan(build, undefined, null);
+  }, [prompt, requestBuildPlan, showNotice, updatePath]);
 
   const beginRefinePlan = useCallback(() => {
     if (accountSwitchingRef.current) return;
+    if (
+      backgroundPlanTaskRef.current
+      && backgroundPlanTaskRef.current.projectId !== activeProject?.id
+    ) {
+      showNotice("另一个 Web App 的方案仍待处理，请先打开它继续或取消", "error");
+      return;
+    }
     const cleanInstruction = instruction.trim();
     if (!activeProject || !activeVersion) return;
     if (cleanInstruction.length < 2) {
@@ -1316,8 +1558,8 @@ export default function Studio({
     setErrorMessage(null);
     setRetryAction(null);
     setPhase("planning");
-    void requestBuildPlan(build);
-  }, [activeProject, activeVersion, instruction, requestBuildPlan]);
+    void requestBuildPlan(build, undefined, activeProject.id);
+  }, [activeProject, activeVersion, instruction, requestBuildPlan, showNotice]);
 
   const adjustBuildPlan = useCallback(() => {
     if (!pendingBuild || !plan || planningLoading) return;
@@ -1330,8 +1572,12 @@ export default function Studio({
       ...current,
       { id: makeId("message"), role: "user", text: feedback, meta: "调整 BuildPlan" },
     ]);
-    void requestBuildPlan(pendingBuild, { currentPlan: plan, feedback });
-  }, [pendingBuild, plan, planFeedback, planningLoading, requestBuildPlan]);
+    void requestBuildPlan(
+      pendingBuild,
+      { currentPlan: plan, feedback },
+      activeProject?.id ?? null,
+    );
+  }, [activeProject?.id, pendingBuild, plan, planFeedback, planningLoading, requestBuildPlan]);
 
   const persistVersion = useCallback(
     async (
@@ -1400,13 +1646,31 @@ export default function Studio({
       showNotice("账号切换完成后再开始构建", "error");
       return;
     }
-    if (mutationInFlightRef.current) return;
+    if (mutationInFlightRef.current) {
+      showNotice("另一个 Web App 正在后台构建，完成后再开始新的构建", "error");
+      return;
+    }
     mutationInFlightRef.current = true;
     const workspaceEpoch = workspaceEpochRef.current;
     const isCurrentWorkspace = () => workspaceEpoch === workspaceEpochRef.current;
     const build = pendingBuild;
     const confirmedPlan = plan;
     const confirmedReasoningSummary = reasoningSummary;
+    const buildStartActiveVersionId = activeVersionIdRef.current;
+    let buildProjectId = activeProject?.id ?? null;
+    const isBuildWorkspaceVisible = () =>
+      isCurrentWorkspace()
+      || Boolean(buildProjectId && activeProjectIdRef.current === buildProjectId);
+    if (buildProjectId) {
+      backgroundBuildProjectIdRef.current = buildProjectId;
+      setBackgroundBuildProjectId(buildProjectId);
+      if (backgroundPlanTaskRef.current?.projectId === buildProjectId) {
+        storeBackgroundPlanTask(null);
+      }
+      if (failedBuildTaskRef.current?.projectId === buildProjectId) {
+        storeFailedBuildTask(null);
+      }
+    }
     setBuildLog(["BuildPlan 已确认", "正在请求线上生成服务"]);
     setPhase("building");
     setErrorMessage(null);
@@ -1421,18 +1685,24 @@ export default function Studio({
         const projectPayload = await requestJson("/api/projects", {
           method: "POST",
           body: JSON.stringify({
-            name: deriveProjectName(build.prompt),
+            title: cleanProjectTitle(confirmedPlan.title, "新 Web App"),
+            name: cleanProjectTitle(confirmedPlan.title, "新 Web App"),
             prompt: build.prompt,
           }),
         });
         project = normalizeProject(projectPayload);
         if (!project) throw new Error("创建项目草稿失败，请重试。 ");
+        buildProjectId = project.id;
+        backgroundBuildProjectIdRef.current = project.id;
+        setBackgroundBuildProjectId(project.id);
+        storeBackgroundPlanTask(null);
+        setProjects((current) => [
+          project as ProjectItem,
+          ...current.filter((item) => item.id !== project?.id),
+        ]);
         if (isCurrentWorkspace()) {
+          activeProjectIdRef.current = project.id;
           setActiveProject(project);
-          setProjects((current) => [
-            project as ProjectItem,
-            ...current.filter((item) => item.id !== project?.id),
-          ]);
           if (window.location.pathname === "/apps/draft") {
             updatePath(`/apps/${encodeURIComponent(project.id)}`, true);
           }
@@ -1499,7 +1769,7 @@ export default function Studio({
         }
       }
 
-      if (isCurrentWorkspace()) {
+      if (isBuildWorkspaceVisible()) {
         setBuildLog((current) => [
           ...current,
           `${providerLabel(generated.provider)} 已返回可运行 Web App`,
@@ -1508,7 +1778,7 @@ export default function Studio({
 
       if (!project) throw new Error("找不到要更新的项目，请返回首页重试。 ");
 
-      if (isCurrentWorkspace()) {
+      if (isBuildWorkspaceVisible()) {
         setBuildLog((current) => [...current, "正在保存应用版本"]);
       }
       const version = await persistVersion(
@@ -1518,15 +1788,24 @@ export default function Studio({
         confirmedPlan,
         confirmedReasoningSummary,
       );
-      if (isCurrentWorkspace()) {
-        const nextVersions = sortVersions([
-          version,
-          ...versions.filter((item) => item.id !== version.id),
-        ]);
+      if (failedBuildTaskRef.current?.projectId === project.id) {
+        storeFailedBuildTask(null);
+      }
+      if (isBuildWorkspaceVisible()) {
+        const shouldSelectNewVersion = build.kind === "new"
+          || !buildStartActiveVersionId
+          || activeVersionIdRef.current === buildStartActiveVersionId;
+        activeProjectIdRef.current = project.id;
         setActiveProject(project);
-        setVersions(nextVersions);
-        setActiveVersionId(version.id);
-        setRecords([]);
+        setVersions((current) => sortVersions([
+          version,
+          ...current.filter((item) => item.id !== version.id),
+        ]));
+        if (shouldSelectNewVersion) {
+          activeVersionIdRef.current = version.id;
+          setActiveVersionId(version.id);
+          setRecords([]);
+        }
         setInstruction("");
         setPendingBuild(null);
         setPlan(null);
@@ -1552,13 +1831,30 @@ export default function Studio({
       }
       void loadProjects(true);
     } catch (error) {
-      if (isCurrentWorkspace()) {
-        setErrorMessage(getErrorMessage(error, "生成过程中出现问题，请重试。"));
+      const errorText = getErrorMessage(error, "生成过程中出现问题，请重试。");
+      if (buildProjectId) {
+        storeFailedBuildTask({
+          projectId: buildProjectId,
+          build,
+          plan: confirmedPlan,
+          reasoningSummary: confirmedReasoningSummary,
+          error: errorText,
+        });
+      }
+      if (isBuildWorkspaceVisible()) {
+        setPendingBuild(build);
+        setPlan(confirmedPlan);
+        setReasoningSummary(confirmedReasoningSummary);
+        setErrorMessage(errorText);
         setRetryAction("build");
         setPhase("planning");
       }
     } finally {
       mutationInFlightRef.current = false;
+      if (backgroundBuildProjectIdRef.current === buildProjectId) {
+        backgroundBuildProjectIdRef.current = null;
+        setBackgroundBuildProjectId(null);
+      }
     }
   }, [
     activeProject,
@@ -1568,12 +1864,14 @@ export default function Studio({
     persistVersion,
     reasoningSummary,
     showNotice,
+    storeBackgroundPlanTask,
+    storeFailedBuildTask,
     updatePath,
-    versions,
   ]);
 
   const chooseVersion = useCallback(
     (version: VersionItem) => {
+      activeVersionIdRef.current = version.id;
       setActiveVersionId(version.id);
       setRecords(version.records);
       setInspectorTab("preview");
@@ -1589,7 +1887,10 @@ export default function Studio({
       showNotice("账号切换完成后再恢复版本", "error");
       return;
     }
-    if (mutationInFlightRef.current) return;
+    if (mutationInFlightRef.current) {
+      showNotice("另一个 Web App 正在后台构建，完成后再恢复版本", "error");
+      return;
+    }
     mutationInFlightRef.current = true;
     const workspaceEpoch = workspaceEpochRef.current;
     const isCurrentWorkspace = () => workspaceEpoch === workspaceEpochRef.current;
@@ -1689,45 +1990,65 @@ export default function Studio({
       || !text
       || chatSending
       || Boolean(deletingProjectId)
-      || chatSendInFlightRef.current
       || (chatLoading && !options?.allowWhileLoading)
     ) return;
+    if (chatSendInFlightRef.current) {
+      showNotice("另一个对话正在后台回复，完成后再发送新的消息", "error");
+      return;
+    }
 
-    const workspaceEpoch = workspaceEpochRef.current;
-    const requestId = chatRequestRef.current + 1;
-    chatRequestRef.current = requestId;
+    chatRequestRef.current += 1;
     chatSendInFlightRef.current = true;
-    const isCurrentChat = () =>
-      workspaceEpoch === workspaceEpochRef.current
-      && requestId === chatRequestRef.current;
+    backgroundChatProjectIdRef.current = project.id;
+    setBackgroundChatProjectId(project.id);
+    const isActiveChat = () => activeProjectIdRef.current === project.id;
+    const lastHistoryMessage = history.at(-1);
+    const failedTask = failedChatTaskRef.current?.projectId === project.id
+      ? failedChatTaskRef.current
+      : null;
+    const retryingFailedMessage = (
+      failedTask?.userMessage.content === text
+      && lastHistoryMessage?.role === "user"
+      && lastHistoryMessage.id === failedTask.userMessage.id
+      && lastHistoryMessage.content === text
+    ) ? lastHistoryMessage : null;
+    if (failedChatTaskRef.current?.projectId === project.id) {
+      storeFailedChatTask(null);
+    }
 
-    const userMessage: ChatMessage = {
-      id: makeId("chat-user"),
-      role: "user",
-      content: text,
-      provider: null,
-      model: null,
-      createdAt: new Date().toISOString(),
-    };
-    setChatMessages([...history, userMessage]);
-    setChatInput("");
-    setChatSending(true);
-    setErrorMessage(null);
+    const userMessage: ChatMessage = retryingFailedMessage ?? {
+        id: makeId("chat-user"),
+        role: "user",
+        content: text,
+        provider: null,
+        model: null,
+        createdAt: new Date().toISOString(),
+      };
+    let userPersisted = retryingFailedMessage ? failedTask?.userPersisted === true : false;
+    if (isActiveChat()) {
+      setChatMessages(retryingFailedMessage ? history : [...history, userMessage]);
+      setChatInput("");
+      setChatSending(true);
+      setErrorMessage(null);
+    }
 
     try {
-      await requestJson(`/api/projects/${encodeURIComponent(project.id)}/chat`, {
-        method: "POST",
-        body: JSON.stringify({
-          messageId: userMessage.id,
-          role: "user",
-          content: userMessage.content,
-          createdAt: userMessage.createdAt,
-        }),
-      });
+      if (!retryingFailedMessage || !userPersisted) {
+        await requestJson(`/api/projects/${encodeURIComponent(project.id)}/chat`, {
+          method: "POST",
+          body: JSON.stringify({
+            messageId: userMessage.id,
+            role: "user",
+            content: userMessage.content,
+            createdAt: userMessage.createdAt,
+          }),
+        });
+        userPersisted = true;
+      }
 
       const requestBody = {
         message: text,
-        history: history
+        history: (retryingFailedMessage ? history.slice(0, -1) : history)
           .slice(-40)
           .map((item) => ({ role: item.role, content: item.content })),
         memory: memory.enabled ? memory.content : "",
@@ -1766,24 +2087,66 @@ export default function Studio({
           createdAt: assistantMessage.createdAt,
         }),
       });
-      if (isCurrentChat()) {
-        setChatMessages((current) => [...current, assistantMessage]);
+      if (failedChatTaskRef.current?.projectId === project.id) {
+        storeFailedChatTask(null);
+      }
+      if (isActiveChat()) {
+        setChatMessages((current) => (
+          current.some((message) => message.id === assistantMessage.id)
+            ? current
+            : [...current, assistantMessage]
+        ));
+      }
+      if (project.name === "新对话" && result.title) {
+        try {
+          const nextTitle = cleanProjectTitle(result.title, "新对话");
+          const updatedPayload = await requestJson(
+            `/api/projects/${encodeURIComponent(project.id)}`,
+            {
+              method: "PATCH",
+              body: JSON.stringify({ title: nextTitle }),
+            },
+          );
+          const updatedProject = normalizeProject(updatedPayload);
+          if (updatedProject) {
+            setProjects((current) => [
+              updatedProject,
+              ...current.filter((item) => item.id !== updatedProject.id),
+            ]);
+            if (isActiveChat()) {
+              activeProjectIdRef.current = updatedProject.id;
+              setActiveProject(updatedProject);
+            }
+          }
+        } catch {
+          // The conversation is already saved; a title failure must not hide the reply.
+        }
       }
       void loadProjects(true);
     } catch (error) {
-      if (isCurrentChat()) {
+      const errorText = getErrorMessage(error, "Agent 回复没有完成，你的问题已经保留。");
+      storeFailedChatTask({
+        projectId: project.id,
+        userMessage,
+        userPersisted,
+        error: `${errorText} 已将问题放回输入框，可以直接重试。`,
+      });
+      if (isActiveChat()) {
         setChatMessages((current) => (
           current.some((message) => message.id === userMessage.id)
             ? current
             : [...history, userMessage]
         ));
-        setErrorMessage(getErrorMessage(error, "Agent 回复没有完成，你的问题已经保留。"));
+        setChatInput(text);
+        setErrorMessage(`${errorText} 已将问题放回输入框，可以直接重试。`);
       }
     } finally {
-      if (requestId === chatRequestRef.current) {
-        chatSendInFlightRef.current = false;
-        if (isCurrentChat()) setChatSending(false);
+      chatSendInFlightRef.current = false;
+      if (backgroundChatProjectIdRef.current === project.id) {
+        backgroundChatProjectIdRef.current = null;
+        setBackgroundChatProjectId(null);
       }
+      if (isActiveChat()) setChatSending(false);
     }
   }, [
     activeProject,
@@ -1794,10 +2157,16 @@ export default function Studio({
     chatSending,
     deletingProjectId,
     loadProjects,
+    showNotice,
+    storeFailedChatTask,
   ]);
 
   const beginNewChat = useCallback(async () => {
     const cleanPrompt = prompt.trim();
+    if (chatSendInFlightRef.current) {
+      showNotice("另一个对话正在后台回复，完成后再创建新对话", "error");
+      return;
+    }
     if (
       cleanPrompt.length < 2
       || accountSwitchingRef.current
@@ -1807,6 +2176,12 @@ export default function Studio({
       return;
     }
     chatCreateInFlightRef.current = true;
+    const creationEpoch = workspaceEpochRef.current;
+    const creationPath = window.location.pathname;
+    const isCreationWorkspaceActive = () => (
+      workspaceEpochRef.current === creationEpoch
+      && window.location.pathname === creationPath
+    );
     setErrorMessage(null);
     setChatLoading(true);
     try {
@@ -1814,27 +2189,30 @@ export default function Studio({
         method: "POST",
         body: JSON.stringify({
           kind: "chat",
-          title: deriveProjectName(cleanPrompt),
-          name: deriveProjectName(cleanPrompt),
+          title: "新对话",
+          name: "新对话",
           prompt: cleanPrompt,
         }),
       });
       const normalized = normalizeProject(payload);
       if (!normalized) throw new Error("创建对话项目失败，请重试。");
       const project: ProjectItem = { ...normalized, kind: "chat" };
-      workspaceEpochRef.current += 1;
-      chatRequestRef.current += 1;
-      setActiveProject(project);
       setProjects((current) => [project, ...current.filter((item) => item.id !== project.id)]);
-      setVersions([]);
-      setActiveVersionId(null);
-      setPhase("ready");
-      setLandingView("project");
-      updatePath(`/chat/${encodeURIComponent(project.id)}`);
-      setChatMessages([]);
-      setChatMemory({ enabled: true, content: "" });
       setPrompt("");
-      setChatLoading(false);
+      if (isCreationWorkspaceActive()) {
+        workspaceEpochRef.current += 1;
+        chatRequestRef.current += 1;
+        activeProjectIdRef.current = project.id;
+        setActiveProject(project);
+        setVersions([]);
+        setActiveVersionId(null);
+        setPhase("ready");
+        setLandingView("project");
+        updatePath(`/chat/${encodeURIComponent(project.id)}`);
+        setChatMessages([]);
+        setChatMemory({ enabled: true, content: "" });
+        setChatLoading(false);
+      }
       await sendChatMessage({
         project,
         text: cleanPrompt,
@@ -1843,12 +2221,14 @@ export default function Studio({
         allowWhileLoading: true,
       });
     } catch (error) {
-      setErrorMessage(getErrorMessage(error, "创建对话项目失败，请重试。"));
+      const errorText = getErrorMessage(error, "创建对话项目失败，请重试。");
+      if (isCreationWorkspaceActive()) setErrorMessage(errorText);
+      else showNotice(errorText, "error");
     } finally {
       chatCreateInFlightRef.current = false;
-      setChatLoading(false);
+      if (isCreationWorkspaceActive()) setChatLoading(false);
     }
-  }, [prompt, sendChatMessage, setPrompt, updatePath]);
+  }, [prompt, sendChatMessage, setPrompt, showNotice, updatePath]);
 
   const saveChatMemory = useCallback(async () => {
     if (!activeProject || activeProject.kind !== "chat") return;
@@ -1873,11 +2253,14 @@ export default function Studio({
   const deleteProject = useCallback(async (project: ProjectItem) => {
     if (deletingProjectId || accountSwitchingRef.current) return;
     if (
-      mutationInFlightRef.current
-      || chatSendInFlightRef.current
-      || chatCreateInFlightRef.current
+      backgroundBuildProjectIdRef.current === project.id
+      || backgroundChatProjectIdRef.current === project.id
+      || (
+        backgroundPlanTaskRef.current?.projectId === project.id
+        && backgroundPlanTaskRef.current.loading
+      )
     ) {
-      showNotice("请等待当前写入完成后再删除项目", "error");
+      showNotice("这个项目仍在后台运行，完成后再删除", "error");
       return;
     }
     if (!window.confirm(`确定删除「${project.name}」吗？此操作无法撤销。`)) return;
@@ -1887,6 +2270,15 @@ export default function Studio({
       await requestJson(`/api/projects/${encodeURIComponent(project.id)}`, {
         method: "DELETE",
       });
+      if (backgroundPlanTaskRef.current?.projectId === project.id) {
+        storeBackgroundPlanTask(null);
+      }
+      if (failedBuildTaskRef.current?.projectId === project.id) {
+        storeFailedBuildTask(null);
+      }
+      if (failedChatTaskRef.current?.projectId === project.id) {
+        storeFailedChatTask(null);
+      }
       setProjects((current) => current.filter((item) => item.id !== project.id));
       if (activeProject?.id === project.id) resetToHome();
       showNotice(`已删除「${project.name}」`);
@@ -1895,7 +2287,15 @@ export default function Studio({
     } finally {
       setDeletingProjectId(null);
     }
-  }, [activeProject, deletingProjectId, resetToHome, showNotice]);
+  }, [
+    activeProject,
+    deletingProjectId,
+    resetToHome,
+    showNotice,
+    storeBackgroundPlanTask,
+    storeFailedBuildTask,
+    storeFailedChatTask,
+  ]);
 
   const beginLogin = useCallback(async () => {
     if (accountSwitchingRef.current) return;
@@ -2009,6 +2409,7 @@ export default function Studio({
       void requestBuildPlan(
         pendingBuild,
         plan && feedback ? { currentPlan: plan, feedback } : undefined,
+        activeProject?.id ?? null,
       );
     }
     if (retryAction === "build") void executeBuild();
@@ -2078,6 +2479,13 @@ export default function Studio({
 
   const cancelPlan = () => {
     planRequestRef.current += 1;
+    const targetProjectId = activeProject?.id ?? null;
+    if (backgroundPlanTaskRef.current?.projectId === targetProjectId) {
+      storeBackgroundPlanTask(null);
+    }
+    if (targetProjectId && failedBuildTaskRef.current?.projectId === targetProjectId) {
+      storeFailedBuildTask(null);
+    }
     setErrorMessage(null);
     setRetryAction(null);
     setPendingBuild(null);
@@ -2108,19 +2516,18 @@ export default function Studio({
           active="projects"
           projects={recentProjects}
           projectCount={projects.length}
-          activeProjectId={activeProject?.id ?? null}
-          hasDraft={Boolean(pendingBuild && !activeProject)}
-          draftName={pendingBuild ? deriveProjectName(pendingBuild.prompt) : null}
+          runningProjectIds={runningProjectIds}
+          hasDraft={hasDraft}
+          draftName={hasDraft ? draftName : null}
           user={user}
           sessionLoading={sessionLoading}
           loginLoading={loginLoading}
           logoutLoading={logoutLoading}
           busy={accountSwitching}
-          workspaceBusy={workspaceWriteBusy}
           onHome={goHome}
           onProjects={goProjects}
           onOpenProject={openOrResumeProject}
-          onOpenDraft={resumeWorkspace}
+          onOpenDraft={resumeDraft}
           onLogin={() => void beginLogin()}
           onLogout={() => void handleLogout()}
         />
@@ -2146,8 +2553,8 @@ export default function Studio({
           <div className="atoms-sync-note" role="status" aria-live="polite">
             <span><UiIcon name={user ? "github" : "folder-heart"} /></span>
             <div>
-              <strong>{user ? `已同步至 ${user.login} 的 GitHub 账号` : "当前为访客工作区"}</strong>
-              <p>{user ? "登录后可以在其他设备继续使用这些项目。" : "项目会保存在当前浏览器，登录 GitHub 后可跨设备访问。"}</p>
+              <strong>{user ? `已登录${user.login} 的 GitHub 账号` : "当前为访客工作区"}</strong>
+              <p>{user ? "可以在其他设备登录后继续使用这些项目" : "项目会保存在当前浏览器，登录 GitHub 后可跨设备访问。"}</p>
             </div>
           </div>
 
@@ -2186,7 +2593,7 @@ export default function Studio({
                     className={`atoms-project-card__cover atoms-project-card__cover--${project.kind}`}
                     type="button"
                     onClick={() => openOrResumeProject(project)}
-                    disabled={accountSwitching || (workspaceWriteBusy && project.id !== activeProject?.id)}
+                    disabled={accountSwitching}
                     aria-label={`打开项目 ${project.name}`}
                   >
                     <span className="atoms-project-card__visual" aria-hidden="true">
@@ -2194,21 +2601,23 @@ export default function Studio({
                       <i /><i /><i />
                     </span>
                     <span className="atoms-project-card__cover-label">
-                      <UiIcon name={project.kind === "chat" ? "brain" : "play"} />
-                      {project.kind === "chat" ? "可继续对话" : "可运行预览"}
+                      <UiIcon name={runningProjectIds.includes(project.id) ? "sparkles" : project.kind === "chat" ? "brain" : "play"} />
+                      {runningProjectIds.includes(project.id)
+                        ? "后台运行中"
+                        : project.kind === "chat" ? "可继续对话" : "可运行预览"}
                     </span>
                   </button>
                   <div className="atoms-project-card__body">
                     <div className="atoms-project-card__heading">
                       <span>
                         <strong>{project.name}</strong>
-                        <small>{project.kind === "chat" ? "对话项目" : `Web App · v${project.currentVersion || 1}`}</small>
+                        <small>{runningProjectIds.includes(project.id) ? "后台运行中" : project.kind === "chat" ? "对话项目" : `Web App · v${project.currentVersion || 1}`}</small>
                       </span>
                       <button
                         className="atoms-icon-action atoms-icon-action--danger"
                         type="button"
                         onClick={() => void deleteProject(project)}
-                        disabled={accountSwitching || workspaceWriteBusy}
+                        disabled={accountSwitching || runningProjectIds.includes(project.id)}
                         aria-label={`删除项目 ${project.name}`}
                       >
                         {deletingProjectId === project.id ? "…" : <UiIcon name="trash" />}
@@ -2220,9 +2629,11 @@ export default function Studio({
                       <button
                         type="button"
                         onClick={() => openOrResumeProject(project)}
-                        disabled={accountSwitching || (workspaceWriteBusy && project.id !== activeProject?.id)}
+                        disabled={accountSwitching}
                       >
-                        {project.kind === "chat" ? "继续对话" : "继续构建"}
+                        {runningProjectIds.includes(project.id)
+                          ? "查看进度"
+                          : project.kind === "chat" ? "继续对话" : "继续构建"}
                         <UiIcon name="arrow-right" />
                       </button>
                     </div>
@@ -2265,19 +2676,18 @@ export default function Studio({
           active="home"
           projects={recentProjects}
           projectCount={projects.length}
-          activeProjectId={activeProject?.id ?? null}
-          hasDraft={Boolean(pendingBuild && !activeProject)}
-          draftName={pendingBuild ? deriveProjectName(pendingBuild.prompt) : null}
+          runningProjectIds={runningProjectIds}
+          hasDraft={hasDraft}
+          draftName={hasDraft ? draftName : null}
           user={user}
           sessionLoading={sessionLoading}
           loginLoading={loginLoading}
           logoutLoading={logoutLoading}
           busy={accountSwitching}
-          workspaceBusy={workspaceWriteBusy}
           onHome={goHome}
           onProjects={goProjects}
           onOpenProject={openOrResumeProject}
-          onOpenDraft={resumeWorkspace}
+          onOpenDraft={resumeDraft}
           onLogin={() => void beginLogin()}
           onLogout={() => void handleLogout()}
         />
@@ -2405,7 +2815,12 @@ export default function Studio({
     );
   }
 
-  const workspaceName = activeProject?.name ?? deriveProjectName(pendingBuild?.prompt ?? prompt);
+  const workspaceName = activeProject?.name
+    ?? cleanProjectTitle(plan?.title ?? "", pendingBuild ? "新 Web App" : "未命名项目");
+  const chatBusyElsewhere = Boolean(
+    backgroundChatProjectId
+    && backgroundChatProjectId !== activeProject?.id,
+  );
 
   if (activeProject?.kind === "chat") {
     return (
@@ -2431,7 +2846,7 @@ export default function Studio({
               {user ? "云端已同步" : "访客工作区"}
             </span>
             <button
-              className="chat-delete-project"
+              className="detail-delete-project"
               type="button"
               onClick={() => void deleteProject(activeProject)}
               disabled={accountSwitching || workspaceWriteBusy}
@@ -2446,6 +2861,7 @@ export default function Studio({
               onLogin={() => void beginLogin()}
               onLogout={() => void handleLogout()}
               compact
+              sidebarMenu
             />
           </div>
         </header>
@@ -2523,11 +2939,11 @@ export default function Studio({
                 placeholder="输入消息，Enter 发送，Shift + Enter 换行…"
                 rows={3}
                 maxLength={4000}
-                disabled={chatLoading || chatSending || Boolean(deletingProjectId) || accountSwitching}
+                disabled={chatLoading || chatSending || chatBusyElsewhere || Boolean(deletingProjectId) || accountSwitching}
               />
               <div>
-                <span>当前上下文 {chatMessages.length} 条</span>
-                <button type="submit" disabled={!chatInput.trim() || chatLoading || chatSending || Boolean(deletingProjectId) || accountSwitching}>
+                <span>{chatBusyElsewhere ? "另一个对话正在后台回复" : `当前上下文 ${chatMessages.length} 条`}</span>
+                <button type="submit" disabled={!chatInput.trim() || chatLoading || chatSending || chatBusyElsewhere || Boolean(deletingProjectId) || accountSwitching}>
                   {chatSending ? "回复中…" : "发送"} <span aria-hidden="true">↑</span>
                 </button>
               </div>
@@ -2612,6 +3028,16 @@ export default function Studio({
                 ? "云端已同步"
                 : "已保存到访客工作区"}
           </span>
+          {activeProject ? (
+            <button
+              className="detail-delete-project"
+              type="button"
+              onClick={() => void deleteProject(activeProject)}
+              disabled={accountSwitching || workspaceWriteBusy}
+            >
+              {deletingProjectId === activeProject.id ? "删除中…" : "删除项目"}
+            </button>
+          ) : null}
           <AccountControl
             user={user}
             loading={sessionLoading}
@@ -2620,6 +3046,7 @@ export default function Studio({
             onLogin={() => void beginLogin()}
             onLogout={() => void handleLogout()}
             compact
+            sidebarMenu
           />
         </div>
       </header>
@@ -2661,7 +3088,7 @@ export default function Studio({
                   key={version.id}
                   onClick={() => chooseVersion(version)}
                   aria-current={version.id === activeVersion?.id ? "true" : undefined}
-                  disabled={accountSwitching || workspaceWriteBusy}
+                  disabled={accountSwitching || versionsLoading || Boolean(deletingProjectId)}
                 >
                   <span><strong>v{version.ordinal}</strong><small>{index === 0 ? "当前版本" : "历史版本"}</small></span>
                   <time dateTime={version.createdAt ?? undefined}>{formatRelativeDate(version.createdAt)}</time>
@@ -2673,7 +3100,7 @@ export default function Studio({
                 className="version-sidebar__restore"
                 type="button"
                 onClick={() => void rollbackVersion()}
-                disabled={rollbackLoading || accountSwitching}
+                disabled={rollbackLoading || accountSwitching || workspaceWriteBusy}
               >
                 {rollbackLoading ? "正在恢复…" : `恢复 v${activeVersion?.ordinal} 为新版本`}
               </button>
@@ -2909,7 +3336,7 @@ export default function Studio({
                       className="forge-button forge-button--secondary"
                       type="button"
                       onClick={() => void rollbackVersion()}
-                      disabled={rollbackLoading || accountSwitching}
+                      disabled={rollbackLoading || accountSwitching || workspaceWriteBusy}
                     >
                       {rollbackLoading ? "正在恢复…" : "恢复此版本"}
                     </button>
@@ -3039,26 +3466,6 @@ export default function Studio({
                   {exportLoading ? "正在导出…" : "导出项目"}
                 </button>
               ) : null}
-              <div className="preview-size" aria-label="预览尺寸">
-                <button
-                  type="button"
-                  className={previewSize === "desktop" ? "is-active" : ""}
-                  onClick={() => setPreviewSize("desktop")}
-                  aria-pressed={previewSize === "desktop"}
-                  aria-label="桌面预览"
-                >
-                  <span aria-hidden="true">▱</span>
-                </button>
-                <button
-                  type="button"
-                  className={previewSize === "mobile" ? "is-active" : ""}
-                  onClick={() => setPreviewSize("mobile")}
-                  aria-pressed={previewSize === "mobile"}
-                  aria-label="移动端预览"
-                >
-                  <span aria-hidden="true">▯</span>
-                </button>
-              </div>
             </div>
           </header>
 
@@ -3068,7 +3475,7 @@ export default function Studio({
                 id="panel-preview"
                 role="tabpanel"
                 aria-labelledby="tab-preview"
-                className={`preview-stage preview-stage--${previewSize}`}
+                className="preview-stage"
               >
                 {activeVersion && previewHtml ? (
                   <div
@@ -3079,11 +3486,11 @@ export default function Studio({
                       <div>chance-atoms.app/{activeProject?.id.slice(0, 8)}</div>
                     </div>
                     <iframe
-                      ref={iframeRef}
                       title={`${activeProject?.name ?? "Atoms 应用"} 可运行预览`}
-                      srcDoc={previewHtml}
+                      srcDoc={previewSrcDoc}
                       sandbox="allow-scripts allow-forms allow-modals"
                       referrerPolicy="no-referrer"
+                      scrolling="no"
                       tabIndex={isHistoricalVersion || accountSwitching ? -1 : 0}
                     />
                     {accountSwitching ? (
@@ -3147,7 +3554,7 @@ function AtomsSidebar({
   active,
   projects,
   projectCount,
-  activeProjectId,
+  runningProjectIds,
   hasDraft,
   draftName,
   user,
@@ -3155,7 +3562,6 @@ function AtomsSidebar({
   loginLoading,
   logoutLoading,
   busy,
-  workspaceBusy,
   onHome,
   onProjects,
   onOpenProject,
@@ -3166,7 +3572,7 @@ function AtomsSidebar({
   active: "home" | "projects";
   projects: ProjectItem[];
   projectCount: number;
-  activeProjectId: string | null;
+  runningProjectIds: string[];
   hasDraft: boolean;
   draftName: string | null;
   user: SessionUser | null;
@@ -3174,7 +3580,6 @@ function AtomsSidebar({
   loginLoading: boolean;
   logoutLoading: boolean;
   busy: boolean;
-  workspaceBusy: boolean;
   onHome: () => void;
   onProjects: () => void;
   onOpenProject: (project: ProjectItem) => void;
@@ -3226,23 +3631,28 @@ function AtomsSidebar({
             <i className="atoms-recent-live" aria-label="进行中" />
           </button>
         ) : null}
-        {projects.map((project) => (
-          <button
-            type="button"
-            key={project.id}
-            onClick={() => onOpenProject(project)}
-            disabled={busy || (workspaceBusy && project.id !== activeProjectId)}
-          >
-            <span className={`atoms-recent-icon atoms-recent-icon--${project.kind === "chat" ? "chat" : "web"}`}>
-              <UiIcon name={project.kind === "chat" ? "message" : "panels"} />
-            </span>
-            <span>
-              <strong>{project.name}</strong>
-              <small>{project.currentVersion === 0 && project.kind === "web_app" ? "构建草稿" : project.kind === "chat" ? "对话" : `Web App · v${project.currentVersion}`}</small>
-            </span>
-            <UiIcon name="arrow-right" />
-          </button>
-        ))}
+        {projects.map((project) => {
+          const running = runningProjectIds.includes(project.id);
+          return (
+            <button
+              type="button"
+              key={project.id}
+              onClick={() => onOpenProject(project)}
+              disabled={busy}
+            >
+              <span className={`atoms-recent-icon atoms-recent-icon--${project.kind === "chat" ? "chat" : "web"}`}>
+                <UiIcon name={project.kind === "chat" ? "message" : "panels"} />
+              </span>
+              <span>
+                <strong>{project.name}</strong>
+                <small>{running ? "后台运行中" : project.currentVersion === 0 && project.kind === "web_app" ? "构建草稿" : project.kind === "chat" ? "对话" : `Web App · v${project.currentVersion}`}</small>
+              </span>
+              {running
+                ? <i className="atoms-recent-live" aria-label="后台运行中" />
+                : <UiIcon name="arrow-right" />}
+            </button>
+          );
+        })}
         {!hasDraft && !projects.length ? (
           <button type="button" className="atoms-sidebar__recent-empty" onClick={onHome} disabled={busy}>
             <span className="atoms-recent-icon atoms-recent-icon--empty"><UiIcon name="sparkles" /></span>

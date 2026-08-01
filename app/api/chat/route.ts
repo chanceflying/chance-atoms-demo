@@ -4,7 +4,45 @@ const MAX_MESSAGE_LENGTH = 12_000;
 const MAX_MEMORY_LENGTH = 12_000;
 const MAX_HISTORY_ITEMS = 40;
 const MAX_REQUEST_BYTES = 512_000;
+const MAX_REPLY_LENGTH = 20_000;
+const MAX_TITLE_LENGTH = 48;
+const DEFAULT_CHAT_TITLE = "新对话";
 const DEFAULT_MODEL = "gpt-5.6-terra";
+const GENERIC_TITLE_KEYS = new Set([
+  "主题讨论",
+  "问题讨论",
+  "话题讨论",
+  "普通对话",
+  "对话",
+  "聊天",
+  "discussion",
+  "conversation",
+  "chat",
+  "newconversation",
+  "newchat",
+]);
+const MECHANICAL_TITLE_SUFFIXES = new Set([
+  "主题讨论",
+  "问题讨论",
+  "话题讨论",
+  "讨论",
+  "总结",
+  "概述",
+  "discussion",
+  "summary",
+  "topic",
+  "chat",
+]);
+
+const chatResponseSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["reply", "title"],
+  properties: {
+    reply: { type: "string", minLength: 1, maxLength: MAX_REPLY_LENGTH },
+    title: { type: "string", minLength: 1, maxLength: MAX_TITLE_LENGTH },
+  },
+} as const;
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -15,6 +53,11 @@ type ChatBody = {
   message?: unknown;
   history?: unknown;
   memory?: unknown;
+};
+
+type ChatResult = {
+  reply: string;
+  title: string;
 };
 
 export async function POST(request: Request) {
@@ -68,14 +111,14 @@ export async function POST(request: Request) {
   }
 
   try {
-    const reply = await chatWithOpenAI({
+    const result = await chatWithOpenAI({
       apiKey,
       model,
       message,
       history,
       memory,
     });
-    return NextResponse.json({ reply, provider: "openai", model });
+    return NextResponse.json({ ...result, provider: "openai", model });
   } catch (error) {
     console.error("OpenAI chat failed", error);
     return NextResponse.json(
@@ -97,7 +140,7 @@ async function chatWithOpenAI({
   message: string;
   history: ChatMessage[];
   memory: string;
-}) {
+}): Promise<ChatResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 90_000);
 
@@ -119,6 +162,7 @@ async function chatWithOpenAI({
               "You are the conversational assistant inside Chance Atoms.",
               "Answer the user's current message directly and naturally in the user's language.",
               "Use the supplied conversation history for continuity.",
+              "Return both reply and title. title must be a concise semantic summary of the conversation's primary topic and user intent, not the first user message copied, lightly trimmed, or extended with a generic suffix. Prefer a specific noun phrase: 4-18 Chinese characters for Chinese, or 3-8 words for other languages. Do not wrap title in quotation marks or end it with punctuation. If no meaningful topic can be inferred, use 新对话 instead of inventing a generic summary.",
               memory
                 ? `The user explicitly configured this long-term memory. Use it only when relevant, and do not invent facts beyond it:\n${memory}`
                 : "No long-term memory is configured for this conversation.",
@@ -127,16 +171,26 @@ async function chatWithOpenAI({
           ...history,
           { role: "user", content: message },
         ],
-        text: { verbosity: "low" },
+        text: {
+          verbosity: "low",
+          format: {
+            type: "json_schema",
+            name: "chance_chat_response",
+            strict: true,
+            schema: chatResponseSchema,
+          },
+        },
         max_output_tokens: 4_000,
       }),
     });
 
     if (!response.ok) throw new Error(`OpenAI returned ${response.status}`);
     const payload = (await response.json()) as unknown;
-    const reply = extractOutputText(payload)?.trim();
-    if (!reply) throw new Error("OpenAI response contained no reply");
-    return reply;
+    const outputText = extractOutputText(payload);
+    if (!outputText) throw new Error("OpenAI response contained no chat result");
+    const firstUserMessage =
+      history.find((item) => item.role === "user")?.content ?? message;
+    return parseChatResult(JSON.parse(outputText), firstUserMessage);
   } finally {
     clearTimeout(timeout);
   }
@@ -211,6 +265,121 @@ function extractOutputText(payload: unknown): string | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseChatResult(value: unknown, firstUserMessage: string): ChatResult {
+  if (!isRecord(value)) throw new TypeError("Chat result must be an object");
+
+  const reply = typeof value.reply === "string" ? value.reply.trim() : "";
+  if (!reply || reply.length > MAX_REPLY_LENGTH) {
+    throw new TypeError("Chat result reply is invalid");
+  }
+  return {
+    reply,
+    title: resolveChatTitle(value.title, firstUserMessage),
+  };
+}
+
+function semanticTitleKey(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/[\p{P}\p{S}\s]+/gu, "");
+}
+
+function cleanTitle(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const title = value
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^["'“”‘’]+|["'“”‘’]+$/g, "")
+    .replace(/[。！？!?.,，；;：:]+$/u, "")
+    .trim();
+  return title.length <= MAX_TITLE_LENGTH ? title : "";
+}
+
+function isUsefulModelTitle(title: string, firstUserMessage: string): boolean {
+  const titleKey = semanticTitleKey(title);
+  const firstMessageKey = semanticTitleKey(firstUserMessage);
+  if (!titleKey || GENERIC_TITLE_KEYS.has(titleKey)) return false;
+  if (!firstMessageKey || titleKey === firstMessageKey) return false;
+  if (titleKey.startsWith(firstMessageKey)) {
+    const suffix = titleKey.slice(firstMessageKey.length);
+    if (MECHANICAL_TITLE_SUFFIXES.has(suffix)) return false;
+  }
+  return true;
+}
+
+function summarizeFirstMessage(firstUserMessage: string): string | null {
+  const source = firstUserMessage
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[。！？!?.,，；;：:]+$/u, "")
+    .trim();
+  if (!source || source.length > 160) return null;
+
+  let summary = source;
+  let changed = false;
+  const preparingMatch = summary.match(
+    /^我(?:最近|现在)?(?:正在|在)?准备(.{2,32})$/u,
+  );
+  if (preparingMatch) {
+    summary = `${preparingMatch[1]}准备`;
+    changed = true;
+  } else if (/[\u3400-\u9fff]/u.test(summary)) {
+    const chinesePrefixes = [
+      /^(?:请问|想请教(?:一下)?|我想(?:请教|了解|知道|咨询)(?:一下)?|我(?:想|需要|希望)(?:要)?|能不能|能否|可以(?:帮我)?|请(?:你)?|麻烦(?:你)?|帮我|帮忙|给我)[\s，,:：]*/u,
+      /^(?:如何|怎么|怎样|为什么|是否|应该如何|该如何)[\s，,:：]*/u,
+      /^(?:分析|整理|总结|规划|制定|设计|实现|创建|构建|搭建|开发|生成|写|介绍|解释|讲解|讲讲|聊聊|讨论|优化|排查|修复|评估|看看)(?:一下|下)?(?:一个|一份|这个|关于)?[\s，,:：]*/u,
+      /^(?:一个|一份|这个|关于)[\s，,:：]*/u,
+    ];
+    for (let pass = 0; pass < 4; pass += 1) {
+      const before = summary;
+      for (const prefix of chinesePrefixes) summary = summary.replace(prefix, "");
+      if (summary === before) break;
+      changed = true;
+    }
+    const withoutQuestionEnding = summary.replace(
+      /(?:可以吗|行吗|好吗|怎么办|怎么做|是什么|有哪些|吗|呢|吧)$/u,
+      "",
+    );
+    if (withoutQuestionEnding !== summary) changed = true;
+    summary = withoutQuestionEnding;
+  } else {
+    const englishPrefixes = [
+      /^(?:please|could you|can you|would you|will you|help me(?: to)?|i (?:want|need|would like) to|how (?:do i|can i|to)|what is|tell me about)\s+/i,
+      /^(?:analyze|summarize|plan|design|create|build|make|develop|write|explain|discuss|review|fix)\s+/i,
+      /^(?:a|an|the)\s+/i,
+    ];
+    for (let pass = 0; pass < 4; pass += 1) {
+      const before = summary;
+      for (const prefix of englishPrefixes) summary = summary.replace(prefix, "");
+      if (summary === before) break;
+      changed = true;
+    }
+  }
+
+  summary = cleanTitle(summary);
+  const summaryKey = semanticTitleKey(summary);
+  if (
+    !changed ||
+    summary.length < 2 ||
+    summary.length > 36 ||
+    !summaryKey ||
+    summaryKey === semanticTitleKey(source) ||
+    GENERIC_TITLE_KEYS.has(summaryKey)
+  ) {
+    return null;
+  }
+  return summary;
+}
+
+function resolveChatTitle(value: unknown, firstUserMessage: string): string {
+  const modelTitle = cleanTitle(value);
+  if (isUsefulModelTitle(modelTitle, firstUserMessage)) return modelTitle;
+  return summarizeFirstMessage(firstUserMessage) ?? DEFAULT_CHAT_TITLE;
 }
 
 function cleanText(value: unknown): string {
