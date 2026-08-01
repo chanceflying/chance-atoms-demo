@@ -23,9 +23,10 @@ test("server-renders the Chance Atoms creation shell", () => {
 });
 
 test("wires the real Studio, persistent routes, and standard OpenNext deployment", async () => {
-  const [page, studio, projectsPage, chatPage, appPage, layout, styles, packageJson, wranglerConfig] = await Promise.all([
+  const [page, studio, bridge, projectsPage, chatPage, appPage, layout, styles, packageJson, wranglerConfig] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/components/Studio.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/codex-session-bridge.mjs", import.meta.url), "utf8"),
     readFile(new URL("../app/projects/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/chat/[projectId]/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/apps/[projectId]/page.tsx", import.meta.url), "utf8"),
@@ -44,6 +45,20 @@ test("wires the real Studio, persistent routes, and standard OpenNext deployment
   assert.ok(studio.indexOf('["all", "全部项目"') < studio.indexOf('["chat", "对话"'));
   assert.ok(studio.indexOf('["chat", "对话"') < studio.indexOf('["web_app", "Web App"'));
   assert.doesNotMatch(studio, /atoms-project-filters/);
+  const homeView = studio.slice(
+    studio.indexOf('if (landingView === "home")'),
+    studio.indexOf("const workspaceName"),
+  );
+  assert.doesNotMatch(homeView, /disabled=\{accountSwitching \|\| workspaceWriteBusy\}/);
+  assert.match(studio, /useRef<Set<string>>\(new Set\(\)\)/);
+  assert.match(studio, /backgroundChatProjectIdsRef\.current\.has\(project\.id\)/);
+  assert.doesNotMatch(studio, /chatSendInFlightRef/);
+  assert.match(studio, /summarizeInitialProjectTitle\(cleanPrompt, "新对话"\)/);
+  assert.match(studio, /summarizeInitialProjectTitle\(cleanPrompt, "新 Web App"\)/);
+  assert.match(studio, /aria-label="修改项目名称"/);
+  assert.match(styles, /\.project-title-editor/);
+  assert.match(bridge, /enqueueModelRequest/);
+  assert.doesNotMatch(bridge, /已有模型任务正在执行|modelRequestInFlight/);
   assert.match(layout, /generateMetadata/);
   assert.match(layout, /Chance Atoms/);
   assert.doesNotMatch(layout, /\/og\.png/);

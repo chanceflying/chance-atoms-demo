@@ -1028,6 +1028,81 @@ select:focus-visible {
   text-transform: uppercase;
 }
 
+.project-title-display {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.project-title-display strong {
+  max-width: min(34vw, 420px);
+}
+
+.project-title-display button,
+.project-title-editor button {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #74776f;
+  cursor: pointer;
+}
+
+.project-title-display button {
+  opacity: 0.62;
+}
+
+.project-title-display button:hover,
+.project-title-display button:focus-visible,
+.project-title-editor button:hover:not(:disabled),
+.project-title-editor button:focus-visible {
+  background: #eceeff;
+  color: #5363ce;
+  opacity: 1;
+  outline: none;
+}
+
+.project-title-display button svg,
+.project-title-editor button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.project-title-editor {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.project-title-editor input {
+  width: clamp(180px, 28vw, 420px);
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid #aeb5ea;
+  border-radius: 8px;
+  outline: none;
+  background: #fff;
+  color: #252722;
+  font: 750 12px/1 var(--sans);
+  box-shadow: 0 0 0 3px rgba(91, 104, 211, 0.1);
+}
+
+.project-title-editor button[type="submit"] {
+  color: #5363ce;
+}
+
+.project-title-editor button:disabled,
+.project-title-display button:disabled {
+  cursor: wait;
+  opacity: 0.4;
+}
+
 .studio-topbar__actions {
   display: flex;
   align-items: center;
@@ -4917,12 +4992,12 @@ select:focus-visible {
 .build-plan--inline .build-plan__header h2,
 .planning-card--inline h2,
 .building-card--inline h2 {
-  font-size: 19px;
+  font-size: 22px;
   line-height: 1.35;
 }
 
 .build-plan--inline .build-plan__brief {
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1.7;
 }
 
@@ -4935,7 +5010,7 @@ select:focus-visible {
 .planning-card--inline p,
 .building-card--inline p,
 .building-card--inline li {
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.65;
 }
 
@@ -4945,7 +5020,24 @@ select:focus-visible {
 .build-plan--inline .plan-details h3,
 .build-plan--inline .plan-steps strong,
 .build-plan--inline .build-plan__note strong {
-  font-size: 13px;
+  font-size: 15px;
+}
+
+.build-plan--inline .section-heading__kicker,
+.planning-card--inline .section-heading__kicker,
+.building-card--inline .section-heading__kicker,
+.build-plan--inline .plan-badge,
+.build-plan--inline .plan-section-heading small,
+.build-plan--inline .plan-steps__number {
+  font-size: 11px;
+}
+
+.building-card--inline .building-log {
+  max-width: 460px;
+}
+
+.building-card--inline .building-log li {
+  padding: 11px 13px;
 }
 
 .refine-composer textarea:focus,
@@ -5298,28 +5390,12 @@ select:focus-visible {
   font-size: 9px;
 }
 
-.version-sidebar__status {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin: 12px 12px 8px;
-  padding: 9px 10px;
-  border-radius: 9px;
-  background: #fff;
-  color: #737970;
-  font-size: 10px;
-}
-
-.version-sidebar__status .status-dot {
-  background: #62bd52;
-}
-
 .version-sidebar__list {
   min-height: 0;
   display: grid;
   align-content: start;
   gap: 6px;
-  padding: 4px 10px 12px;
+  padding: 12px 10px;
   overflow-y: auto;
 }
 

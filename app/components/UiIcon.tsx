@@ -14,6 +14,7 @@ export type UiIconName =
   | "arrow-right"
   | "arrow-up"
   | "plus"
+  | "edit"
   | "trash"
   | "clock"
   | "gamepad"
@@ -66,6 +67,7 @@ export default function UiIcon({ name, ...props }: UiIconProps) {
       {name === "arrow-right" ? <><path d="M5 12h14M13 6l6 6-6 6" /></> : null}
       {name === "arrow-up" ? <><path d="M12 19V5M6 11l6-6 6 6" /></> : null}
       {name === "plus" ? <><path d="M12 5v14M5 12h14" /></> : null}
+      {name === "edit" ? <><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" /></> : null}
       {name === "trash" ? <><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" /></> : null}
       {name === "clock" ? <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></> : null}
       {name === "gamepad" ? <><path d="M8 8h8a5 5 0 0 1 4.8 6.4l-.8 2.8a2.5 2.5 0 0 1-4.2 1L14 16h-4l-1.8 2.2a2.5 2.5 0 0 1-4.2-1l-.8-2.8A5 5 0 0 1 8 8Z" /><path d="M7 12v4M5 14h4M16 13h.01M18 15h.01" /></> : null}

@@ -51,8 +51,17 @@ const PLAN_SCHEMA_PATH = join(SCRIPT_DIR, "web-app-plan.schema.json");
 const CHAT_SCHEMA_PATH = join(SCRIPT_DIR, "chat-response.schema.json");
 const PRODUCTION_ORIGIN = "https://chance-atoms-demo.chanceflying1.workers.dev";
 
-let modelRequestInFlight = false;
 let activeChild = null;
+let modelQueue = Promise.resolve();
+
+function enqueueModelRequest(task) {
+  const result = modelQueue.then(task, task);
+  modelQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -776,12 +785,6 @@ const server = createServer(async (request, response) => {
     return;
   }
 
-  if (modelRequestInFlight) {
-    sendJson(response, 429, { error: "已有模型任务正在执行，请稍后重试。" }, headers);
-    return;
-  }
-
-  modelRequestInFlight = true;
   const abortController = new AbortController();
   const abort = () => abortController.abort();
   request.once("aborted", abort);
@@ -796,25 +799,30 @@ const server = createServer(async (request, response) => {
       : isChatRequest
         ? parseChatRequest(body)
         : parseGenerateRequest(body);
-    const result = isPlanRequest
-      ? await executeCodex(buildPlanPrompt(input), abortController.signal, {
-          schemaPath: PLAN_SCHEMA_PATH,
-          validateOutput: validatePlanResult,
-        })
-      : isChatRequest
-        ? await executeCodex(buildChatPrompt(input), abortController.signal, {
-            schemaPath: CHAT_SCHEMA_PATH,
-            validateOutput: (value) =>
-              validateChatResult(
-                value,
-                input.history.find((item) => item.role === "user")?.content ??
-                  input.message,
-              ),
+    const result = await enqueueModelRequest(async () => {
+      if (abortController.signal.aborted) {
+        throw new HttpError(499, "请求已取消。 ");
+      }
+      return isPlanRequest
+        ? executeCodex(buildPlanPrompt(input), abortController.signal, {
+            schemaPath: PLAN_SCHEMA_PATH,
+            validateOutput: validatePlanResult,
           })
-      : await executeCodex(buildCodexPrompt(input), abortController.signal, {
-          schemaPath: ARTIFACT_SCHEMA_PATH,
-          validateOutput: validateArtifact,
-        });
+        : isChatRequest
+          ? executeCodex(buildChatPrompt(input), abortController.signal, {
+              schemaPath: CHAT_SCHEMA_PATH,
+              validateOutput: (value) =>
+                validateChatResult(
+                  value,
+                  input.history.find((item) => item.role === "user")?.content ??
+                    input.message,
+                ),
+            })
+          : executeCodex(buildCodexPrompt(input), abortController.signal, {
+              schemaPath: ARTIFACT_SCHEMA_PATH,
+              validateOutput: validateArtifact,
+            });
+    });
     if (!response.destroyed) {
       const payload = isPlanRequest
         ? { ...result, provider: PROVIDER, model: MODEL }
@@ -834,8 +842,6 @@ const server = createServer(async (request, response) => {
     const message = error instanceof Error ? error.message : "本地 Codex 桥接执行失败。";
     if (status >= 500 && !(error instanceof HttpError)) console.error(error);
     sendJson(response, status, { error: message }, headers);
-  } finally {
-    modelRequestInFlight = false;
   }
 });
 

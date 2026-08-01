@@ -19,6 +19,7 @@ import {
   isWebAppArtifact,
   parseRecordsForArtifact,
   parseStoredArtifact,
+  summarizeInitialProjectTitle,
   type StoredArtifact,
 } from "@/lib";
 
@@ -59,9 +60,10 @@ export async function POST(request: Request) {
     const requestedTitle =
       optionalString(payload, "title", 200) ??
       optionalString(payload, "name", 200);
-    const title = requestedTitle || (kind === "chat"
-      ? titleFromPrompt(prompt, "Untitled conversation")
-      : titleFromPrompt(prompt));
+    const title = requestedTitle || summarizeInitialProjectTitle(
+      prompt,
+      kind === "chat" ? "新对话" : "新 Web App",
+    );
     const rawArtifact = Object.hasOwn(payload, "artifact")
       ? payload.artifact
       : payload.spec === undefined
@@ -118,12 +120,6 @@ export async function POST(request: Request) {
   } catch (error) {
     return errorResponse(workspace, error);
   }
-}
-
-function titleFromPrompt(prompt: string, fallback = "Untitled project") {
-  const normalized = prompt.replace(/\s+/g, " ").trim();
-  if (!normalized) return fallback;
-  return normalized.length > 64 ? `${normalized.slice(0, 61)}...` : normalized;
 }
 
 type ProjectKind = "web_app" | "chat";

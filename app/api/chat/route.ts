@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { summarizeInitialProjectTitle } from "@/lib/project-title";
 
 const MAX_MESSAGE_LENGTH = 12_000;
 const MAX_MEMORY_LENGTH = 12_000;
@@ -311,75 +312,10 @@ function isUsefulModelTitle(title: string, firstUserMessage: string): boolean {
   return true;
 }
 
-function summarizeFirstMessage(firstUserMessage: string): string | null {
-  const source = firstUserMessage
-    .normalize("NFKC")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/[。！？!?.,，；;：:]+$/u, "")
-    .trim();
-  if (!source || source.length > 160) return null;
-
-  let summary = source;
-  let changed = false;
-  const preparingMatch = summary.match(
-    /^我(?:最近|现在)?(?:正在|在)?准备(.{2,32})$/u,
-  );
-  if (preparingMatch) {
-    summary = `${preparingMatch[1]}准备`;
-    changed = true;
-  } else if (/[\u3400-\u9fff]/u.test(summary)) {
-    const chinesePrefixes = [
-      /^(?:请问|想请教(?:一下)?|我想(?:请教|了解|知道|咨询)(?:一下)?|我(?:想|需要|希望)(?:要)?|能不能|能否|可以(?:帮我)?|请(?:你)?|麻烦(?:你)?|帮我|帮忙|给我)[\s，,:：]*/u,
-      /^(?:如何|怎么|怎样|为什么|是否|应该如何|该如何)[\s，,:：]*/u,
-      /^(?:分析|整理|总结|规划|制定|设计|实现|创建|构建|搭建|开发|生成|写|介绍|解释|讲解|讲讲|聊聊|讨论|优化|排查|修复|评估|看看)(?:一下|下)?(?:一个|一份|这个|关于)?[\s，,:：]*/u,
-      /^(?:一个|一份|这个|关于)[\s，,:：]*/u,
-    ];
-    for (let pass = 0; pass < 4; pass += 1) {
-      const before = summary;
-      for (const prefix of chinesePrefixes) summary = summary.replace(prefix, "");
-      if (summary === before) break;
-      changed = true;
-    }
-    const withoutQuestionEnding = summary.replace(
-      /(?:可以吗|行吗|好吗|怎么办|怎么做|是什么|有哪些|吗|呢|吧)$/u,
-      "",
-    );
-    if (withoutQuestionEnding !== summary) changed = true;
-    summary = withoutQuestionEnding;
-  } else {
-    const englishPrefixes = [
-      /^(?:please|could you|can you|would you|will you|help me(?: to)?|i (?:want|need|would like) to|how (?:do i|can i|to)|what is|tell me about)\s+/i,
-      /^(?:analyze|summarize|plan|design|create|build|make|develop|write|explain|discuss|review|fix)\s+/i,
-      /^(?:a|an|the)\s+/i,
-    ];
-    for (let pass = 0; pass < 4; pass += 1) {
-      const before = summary;
-      for (const prefix of englishPrefixes) summary = summary.replace(prefix, "");
-      if (summary === before) break;
-      changed = true;
-    }
-  }
-
-  summary = cleanTitle(summary);
-  const summaryKey = semanticTitleKey(summary);
-  if (
-    !changed ||
-    summary.length < 2 ||
-    summary.length > 36 ||
-    !summaryKey ||
-    summaryKey === semanticTitleKey(source) ||
-    GENERIC_TITLE_KEYS.has(summaryKey)
-  ) {
-    return null;
-  }
-  return summary;
-}
-
 function resolveChatTitle(value: unknown, firstUserMessage: string): string {
   const modelTitle = cleanTitle(value);
   if (isUsefulModelTitle(modelTitle, firstUserMessage)) return modelTitle;
-  return summarizeFirstMessage(firstUserMessage) ?? DEFAULT_CHAT_TITLE;
+  return summarizeInitialProjectTitle(firstUserMessage, DEFAULT_CHAT_TITLE);
 }
 
 function cleanText(value: unknown): string {
