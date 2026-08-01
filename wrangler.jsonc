@@ -1,0 +1,33 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "chance-atoms-demo",
+	"workers_dev": true,
+	"preview_urls": false,
+	"main": ".open-next/worker.js",
+	"compatibility_date": "2026-05-22",
+	"compatibility_flags": [
+		"nodejs_compat",
+		"global_fetch_strictly_public"
+	],
+	"assets": {
+		"directory": ".open-next/assets",
+		"binding": "ASSETS"
+	},
+	"services": [
+		{
+			"binding": "WORKER_SELF_REFERENCE",
+			"service": "chance-atoms-demo"
+		}
+	],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "chance-atoms-demo-db",
+			"database_id": "b97f52bd-6bf5-4a6c-9f5c-e2849fccfcfa",
+			"migrations_dir": "drizzle"
+		}
+	],
+	"observability": {
+		"enabled": true
+	}
+}

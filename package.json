@@ -1,0 +1,54 @@
+{
+  "name": "chance-atoms-demo",
+  "version": "0.1.0",
+  "private": true,
+  "homepage": "https://chance-atoms-demo.chanceflying1.workers.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chanceflying/chance-atoms-demo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chanceflying/chance-atoms-demo/issues"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "build:worker": "opennextjs-cloudflare build",
+    "start": "next start",
+    "preview": "npm run build:worker && opennextjs-cloudflare preview",
+    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+    "deploy:worker": "opennextjs-cloudflare deploy",
+    "upload": "npm run build:worker && opennextjs-cloudflare upload",
+    "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
+    "test": "node --import tsx --test tests/domain-runtime.test.ts tests/export-project.test.ts tests/rendered-html.test.ts",
+    "smoke": "node scripts/smoke-http.mjs",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .open-next --ignore-pattern cloudflare-env.d.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote"
+  },
+  "dependencies": {
+    "@opennextjs/cloudflare": "1.20.1",
+    "drizzle-orm": "0.45.2",
+    "next": "16.2.6",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.2.1",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "drizzle-kit": "0.31.10",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.2.6",
+    "tailwindcss": "4.2.1",
+    "tsx": "^4.20.6",
+    "typescript": "5.9.3",
+    "wrangler": "4.92.0"
+  },
+  "type": "module"
+}
