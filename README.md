@@ -4,7 +4,7 @@
 
 - 在线 Demo：[chance-atoms-demo.chanceflying1.workers.dev](https://chance-atoms-demo.chanceflying1.workers.dev)
 - GitHub：[chanceflying/chance-atoms-demo](https://github.com/chanceflying/chance-atoms-demo)
-- 面试设计、架构与取舍：[INTERVIEW.md](INTERVIEW.md)
+- 项目设计、架构与取舍：[PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)
 - Cloudflare 部署细节：[.github/DEPLOYMENT.md](.github/DEPLOYMENT.md)
 
 ## 项目能做什么
