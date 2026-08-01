@@ -56,6 +56,7 @@ test("wires the real Studio, persistent routes, and standard OpenNext deployment
   assert.match(studio, /summarizeInitialProjectTitle\(cleanPrompt, "新对话"\)/);
   assert.match(studio, /summarizeInitialProjectTitle\(cleanPrompt, "新 Web App"\)/);
   assert.match(studio, /aria-label="修改项目名称"/);
+  assert.doesNotMatch(studio, /你正在查看历史版本|恢复此版本|history-callout/);
   assert.match(styles, /\.project-title-editor/);
   assert.match(bridge, /enqueueModelRequest/);
   assert.doesNotMatch(bridge, /已有模型任务正在执行|modelRequestInFlight/);

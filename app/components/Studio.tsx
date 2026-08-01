@@ -3513,22 +3513,6 @@ export default function Studio({
                     <strong>{providerLabel(activeVersion.provider)}</strong> 生成来源
                   </span>
                 </div>
-                {isHistoricalVersion ? (
-                  <div className="history-callout">
-                    <div>
-                      <strong>你正在查看历史版本 v{activeVersion.ordinal}</strong>
-                      <p>恢复操作会复制成一个新版本，不会删除后续改动。</p>
-                    </div>
-                    <button
-                      className="forge-button forge-button--secondary"
-                      type="button"
-                      onClick={() => void rollbackVersion()}
-                      disabled={rollbackLoading || accountSwitching || workspaceWriteBusy}
-                    >
-                      {rollbackLoading ? "正在恢复…" : "恢复此版本"}
-                    </button>
-                  </div>
-                ) : null}
               </section>
             ) : null}
             </div>
