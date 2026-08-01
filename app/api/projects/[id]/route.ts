@@ -7,6 +7,7 @@ import {
   jsonText,
   optionalNonNegativeInteger,
   optionalString,
+  parseStoredJson,
   readJsonObject,
   RequestError,
   workspaceForRequest,
@@ -16,6 +17,12 @@ import {
   serializeProject,
   type DatabaseRow,
 } from "../../../../db/serializers";
+import {
+  isWebAppArtifact,
+  parseRecordsForArtifact,
+  parseStoredArtifact,
+  type StoredArtifact,
+} from "@/lib";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -55,8 +62,10 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     workspace = await resolveIdentity(request);
     const { id } = await params;
     const payload = await readJsonObject(request);
+    const db = await ensureDatabase();
     const assignments: string[] = [];
     const values: unknown[] = [];
+    let artifact: StoredArtifact | null = null;
 
     if (Object.hasOwn(payload, "title")) {
       const title = optionalString(payload, "title", 200);
@@ -65,17 +74,45 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       values.push(title);
     }
 
-    if (Object.hasOwn(payload, "spec") || Object.hasOwn(payload, "currentSpec")) {
-      const rawSpec = Object.hasOwn(payload, "spec")
-        ? payload.spec
-        : payload.currentSpec;
+    if (
+      Object.hasOwn(payload, "artifact")
+      || Object.hasOwn(payload, "spec")
+      || Object.hasOwn(payload, "currentSpec")
+    ) {
+      const rawArtifact = Object.hasOwn(payload, "artifact")
+        ? payload.artifact
+        : Object.hasOwn(payload, "spec")
+          ? payload.spec
+          : payload.currentSpec;
+      artifact = validArtifact(rawArtifact);
       assignments.push("current_spec = ?");
-      values.push(jsonText(rawSpec, {}));
+      values.push(jsonText(artifact, {}));
     }
 
     if (Object.hasOwn(payload, "records")) {
+      if (!artifact) {
+        const current = await db
+          .prepare(`
+            SELECT current_spec
+            FROM projects
+            WHERE id = ? AND workspace_id = ?
+          `)
+          .bind(id, workspace.id)
+          .first<DatabaseRow>();
+        if (!current) {
+          return jsonResponse(workspace, { error: "Project not found" }, { status: 404 });
+        }
+        artifact = optionalArtifact(parseStoredJson(current.current_spec, {}));
+      }
       assignments.push("records = ?");
-      values.push(jsonText(payload.records, []));
+      values.push(
+        artifact
+          ? jsonText(validRecordsForArtifact(payload.records, artifact), [])
+          : jsonText(payload.records, []),
+      );
+    } else if (artifact && isWebAppArtifact(artifact)) {
+      assignments.push("records = ?");
+      values.push("[]");
     }
 
     if (Object.hasOwn(payload, "currentVersion")) {
@@ -86,13 +123,12 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     if (assignments.length === 0) {
       throw new RequestError(
         400,
-        "PATCH requires one of: title, spec, currentSpec, records, currentVersion",
+        "PATCH requires one of: title, artifact, spec, currentSpec, records, currentVersion",
       );
     }
 
     assignments.push("updated_at = ?");
     values.push(new Date().toISOString(), id, workspace.id);
-    const db = await ensureDatabase();
     const updated = await db
       .prepare(`
         UPDATE projects
@@ -109,6 +145,30 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     return jsonResponse(workspace, { project: serializeProject(updated) });
   } catch (error) {
     return errorResponse(workspace, error);
+  }
+}
+
+function validArtifact(value: unknown): StoredArtifact {
+  try {
+    return parseStoredArtifact(value);
+  } catch {
+    throw new RequestError(400, "spec must be a valid stored artifact");
+  }
+}
+
+function optionalArtifact(value: unknown): StoredArtifact | null {
+  try {
+    return parseStoredArtifact(value);
+  } catch {
+    return null;
+  }
+}
+
+function validRecordsForArtifact(value: unknown, artifact: StoredArtifact) {
+  try {
+    return parseRecordsForArtifact(value, artifact);
+  } catch {
+    throw new RequestError(400, "records must match the current artifact");
   }
 }
 

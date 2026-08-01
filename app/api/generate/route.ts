@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 import {
   deterministicAgent,
+  isWebAppArtifact,
   parseAppSpec,
+  parseStoredArtifact,
   type AppSpec,
+  type WebAppArtifact,
 } from "@/lib";
 
 const MAX_PROMPT_LENGTH = 1_200;
-const MAX_REQUEST_BYTES = 64_000;
+const MAX_REQUEST_BYTES = 240_000;
+const MAX_GENERATED_HTML_LENGTH = 160_000;
 const DEFAULT_MODEL = "gpt-5.6-terra";
 
 const appSpecSchema = {
@@ -133,10 +137,46 @@ const appSpecSchema = {
   },
 } as const;
 
+const webAppArtifactSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "schemaVersion",
+    "kind",
+    "title",
+    "description",
+    "html",
+    "acceptanceCriteria",
+  ],
+  properties: {
+    schemaVersion: { type: "number", enum: [1] },
+    kind: { type: "string", enum: ["web_app"] },
+    title: { type: "string", minLength: 1, maxLength: 80 },
+    description: { type: "string", minLength: 1, maxLength: 240 },
+    html: {
+      type: "string",
+      minLength: 200,
+      maxLength: MAX_GENERATED_HTML_LENGTH,
+      description:
+        "A complete self-contained index.html with inline CSS and JavaScript and no external dependencies.",
+    },
+    acceptanceCriteria: {
+      type: "array",
+      minItems: 3,
+      maxItems: 10,
+      items: { type: "string", minLength: 1, maxLength: 160 },
+    },
+  },
+} as const;
+
+type ArtifactKind = "crud" | "web_app";
+
 type GenerateBody = {
   prompt?: unknown;
   previousSpec?: unknown;
+  previousArtifact?: unknown;
   instruction?: unknown;
+  artifactKind?: unknown;
 };
 
 export async function POST(request: Request) {
@@ -165,6 +205,14 @@ export async function POST(request: Request) {
 
   const prompt = cleanText(body.prompt);
   const instruction = cleanText(body.instruction);
+  const requestedKind = cleanText(body.artifactKind);
+
+  if (requestedKind && requestedKind !== "crud" && requestedKind !== "web_app") {
+    return NextResponse.json(
+      { error: "artifactKind 必须是 crud 或 web_app。" },
+      { status: 400 },
+    );
+  }
 
   if (!prompt && !instruction) {
     return NextResponse.json(
@@ -178,6 +226,67 @@ export async function POST(request: Request) {
       { error: `单次描述请控制在 ${MAX_PROMPT_LENGTH} 字以内。` },
       { status: 400 },
     );
+  }
+
+  let artifactKind: ArtifactKind = requestedKind === "web_app" ? "web_app" : "crud";
+  let previousArtifact: WebAppArtifact | undefined;
+  const rawPreviousArtifact = body.previousArtifact ?? body.previousSpec;
+  if (rawPreviousArtifact && requestedKind !== "crud") {
+    try {
+      const parsed = parseStoredArtifact(rawPreviousArtifact);
+      if (isWebAppArtifact(parsed)) {
+        artifactKind = "web_app";
+        previousArtifact = parsed;
+      } else if (requestedKind === "web_app") {
+        throw new TypeError("Expected a WebAppArtifact");
+      }
+    } catch {
+      return NextResponse.json(
+        { error: "当前版本的数据不完整，请刷新后重试。" },
+        { status: 400 },
+      );
+    }
+  }
+
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  const model = process.env.OPENAI_MODEL?.trim() || DEFAULT_MODEL;
+
+  if (artifactKind === "web_app") {
+    if (!apiKey) {
+      return NextResponse.json(
+        {
+          error:
+            "未检测到可用的真实模型。请先在本机运行 npm run model:bridge，或为线上环境配置 OPENAI_API_KEY。",
+          code: "OPENAI_NOT_CONFIGURED",
+          provider: "unavailable",
+        },
+        { status: 503 },
+      );
+    }
+
+    try {
+      const artifact = await generateWebAppWithOpenAI({
+        apiKey,
+        model,
+        prompt,
+        instruction,
+        previousArtifact,
+      });
+      return NextResponse.json({
+        artifact,
+        spec: artifact,
+        provider: "openai",
+        model,
+        warning: null,
+        stages: ["AI 规划", "生成单文件应用", "校验产物", "准备预览"],
+      });
+    } catch (error) {
+      console.error("OpenAI web app generation failed", error);
+      return NextResponse.json(
+        { error: "真实模型生成失败，请稍后重试；Web App 模式不会静默降级为模板。" },
+        { status: 502 },
+      );
+    }
   }
 
   let previousSpec: AppSpec | undefined;
@@ -214,9 +323,6 @@ export async function POST(request: Request) {
     });
   };
 
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  const model = process.env.OPENAI_MODEL?.trim() || DEFAULT_MODEL;
-
   if (!apiKey) {
     return fallbackResponse(
       "当前使用本地 Agent 演示模式；配置模型密钥后会自动切换为真实 AI。",
@@ -246,6 +352,82 @@ export async function POST(request: Request) {
       "AI 服务暂时不可用，已切换到本地 Agent，完整流程仍可体验。",
       ["AI 服务降级", "本地规划", "校验结构", "准备预览"],
     );
+  }
+}
+
+async function generateWebAppWithOpenAI({
+  apiKey,
+  model,
+  prompt,
+  instruction,
+  previousArtifact,
+}: {
+  apiKey: string;
+  model: string;
+  prompt: string;
+  instruction: string;
+  previousArtifact?: WebAppArtifact;
+}): Promise<WebAppArtifact> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60_000);
+  const task = previousArtifact
+    ? [
+        "Update the existing self-contained web application according to the change request.",
+        `Original request: ${prompt || previousArtifact.description}`,
+        `Change request: ${instruction}`,
+        `Existing artifact: ${JSON.stringify(previousArtifact)}`,
+      ].join("\n\n")
+    : `Create a complete self-contained web application for this request:\n\n${prompt}`;
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        reasoning: { effort: "low" },
+        input: [
+          {
+            role: "system",
+            content:
+              "You are Chance Atoms Web App Builder. Return only the requested WebAppArtifact. The html must be one complete index.html with all CSS and JavaScript inline. Do not use npm, imports, CDNs, remote images, fetch, external fonts, or any network dependency. Make the application polished, immediately usable, keyboard accessible, and responsive. Match the user's language. For games, include the full game loop, controls, score, game-over state, and restart behavior. Preserve working behavior when refining an existing artifact.",
+          },
+          { role: "user", content: task },
+        ],
+        text: {
+          verbosity: "low",
+          format: {
+            type: "json_schema",
+            name: "chance_web_app_artifact",
+            strict: true,
+            schema: webAppArtifactSchema,
+          },
+        },
+        max_output_tokens: 24_000,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI returned ${response.status}`);
+    }
+
+    const payload = (await response.json()) as unknown;
+    const outputText = extractOutputText(payload);
+    if (!outputText) throw new Error("OpenAI response contained no output text");
+    const artifact = parseStoredArtifact(JSON.parse(outputText));
+    if (!isWebAppArtifact(artifact)) {
+      throw new TypeError("OpenAI did not return a WebAppArtifact");
+    }
+    if (artifact.html.length > MAX_GENERATED_HTML_LENGTH) {
+      throw new TypeError("Generated HTML is too large");
+    }
+    return artifact;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

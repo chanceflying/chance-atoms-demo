@@ -5,6 +5,7 @@ import { AppSpecValidationError } from "@/lib/validation";
 const MAX_REQUEST_BYTES = 1_000_000;
 
 type ExportBody = {
+  artifact?: unknown;
   spec?: unknown;
   records?: unknown;
   projectId?: unknown;
@@ -27,13 +28,14 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "请求格式无效。" }, { status: 400 });
   }
 
-  if (!body.spec) {
+  const artifact = body.artifact ?? body.spec;
+  if (!artifact) {
     return NextResponse.json({ error: "缺少可导出的应用版本。" }, { status: 400 });
   }
 
   try {
     const result = createStandaloneProject({
-      spec: body.spec,
+      artifact,
       records: body.records,
       projectId: body.projectId,
     });

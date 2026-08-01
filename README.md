@@ -2,46 +2,54 @@
 
 > 一个可以公开部署、完整运行并继续迭代的 AI 应用生成 Demo。
 
-Forge 是 Demo 内的产品名，`chance-atoms-demo` 是仓库、Cloudflare Worker 和交付项目名。用户用自然语言描述内部工具，先审阅执行计划，再生成一个可直接操作、持久保存、继续修改和回滚的 CRUD 应用。
+Forge 是 Demo 内的产品名，`chance-atoms-demo` 是仓库、Cloudflare Worker 和交付项目名。用户用自然语言描述需求，先审阅执行计划，再生成一个可直接运行、持久保存、继续修改和回滚的应用。当前同时支持声明式 CRUD 数据应用和模型生成的单文件 Web App（例如贪吃蛇）。
 
 ## 在线体验与源码
 
 - 在线 Demo：[https://chance-atoms-demo.chanceflying1.workers.dev](https://chance-atoms-demo.chanceflying1.workers.dev)
 - GitHub 源码：[https://github.com/chanceflying/chance-atoms-demo](https://github.com/chanceflying/chance-atoms-demo)
 
-公开 Demo 默认不配置模型密钥，使用仓库内的确定性 Agent，避免匿名访问消耗第三方额度。代码同时支持服务端 OpenAI Responses API；在受控环境配置密钥后会自动切换为模型生成。
+模型路由优先级固定为：
+
+1. 线上 Worker 配置了 `OPENAI_API_KEY` 时，优先使用服务端 OpenAI Responses API；
+2. 线上没有密钥且当前浏览器运行在用户本机时，Web App 模式回退到 `127.0.0.1:4317` 的 Codex Bridge，复用本机已登录的 ChatGPT/Codex 订阅；
+3. 两种真实模型均不可用时，Web App 明确提示错误；CRUD 模式仍可使用仓库内的确定性 Agent 演示。
+
+ChatGPT/Codex 登录凭证不会上传到 Cloudflare，Bridge 只把生成后的 `WebAppArtifact` 返回给页面。
 
 ## 核心体验
 
 1. 输入需求，或选择“客户线索看板 / 内容发布日历 / 设备巡检台”模板。
 2. Forge 先生成四步计划，只有用户确认后才开始构建。
-3. Agent 生成声明式 `AppSpec`，服务端校验后由固定编译器生成应用。
+3. 数据应用生成声明式 `AppSpec` 并由固定编译器生成；Web App 生成自包含的 `WebAppArtifact`（内联 HTML/CSS/JavaScript）。
 4. 在 Preview 中新增、编辑、删除、搜索和筛选记录，数据自动保存到 D1。
 5. 用自然语言继续调整字段、布局或主题；每次调整创建一个新版本。
 6. 历史版本只读，可复制恢复成新的当前版本，不覆盖后续历史。
-7. 点击“导出项目”，下载一个无依赖 ZIP；其中的 `index.html` 可独立部署并用 `localStorage` 保存数据。
+7. 点击“导出项目”，下载一个无依赖 ZIP；其中的 `index.html` 可独立部署。
 8. 访客项目直接保存到 D1；使用 GitHub 登录后会自动认领当前项目，并支持跨浏览器、跨设备找回。
 
 完整链路：
 
 ```text
-Prompt → Plan approval → AppSpec → Validation → Safe compiler
-       → Runnable CRUD app → D1 persistence → Refine / Rollback / Export
+Prompt → Plan approval → Provider routing
+       ├─ CRUD → AppSpec → Validator → deterministic compiler
+       └─ Web App → WebAppArtifact → sandboxed srcDoc preview
+       → D1 persistence → Refine / Rollback / Export
 ```
 
 ## 与笔试要求的对应关系
 
 | 要求 | 当前实现 |
 | --- | --- |
-| 自然语言生成应用 | `/api/generate`，支持 OpenAI Responses API 和本地确定性降级 |
+| 自然语言生成应用 | `/api/generate` 优先 OpenAI；无线上密钥时，浏览器按明确错误码回退本机 Codex Bridge |
 | 过程可理解、可控制 | 生成前展示四步 Plan，必须由用户明确确认 |
-| 结果真正可运行 | 声明式 AppSpec 经固定编译器生成完整 CRUD HTML，在 sandbox iframe 中运行 |
+| 结果真正可运行 | CRUD 使用固定编译器；Web App 直接运行模型生成的完整单文件应用，均放入 sandbox iframe |
 | 支持持续修改 | 基于当前 Spec 的 refinement，每次形成独立版本 |
 | 数据不是静态展示 | iframe 通过 `postMessage` 回传 CRUD 变化，Next.js API 写入 D1 |
 | 访客试用与账号同步 | 匿名 workspace 免登录保存；GitHub OAuth 登录后迁移到账号 workspace |
 | 可恢复、可追溯 | 项目与版本快照持久化；Rollback 复制成新版本 |
-| 可独立交付 | 应用内可导出无依赖 ZIP；仓库本身也可标准部署到 Cloudflare |
-| 稳定演示 | 无密钥 Agent、模型失败降级、输入校验、Schema 数据迁移和错误提示 |
+| 可独立交付 | 两类应用都可导出无依赖 ZIP；仓库本身也可标准部署到 Cloudflare |
+| 稳定演示 | CRUD 保留无密钥 Agent；Web App 不伪装降级，真实模型不可用时明确提示 |
 
 ## 技术架构
 
@@ -51,9 +59,12 @@ Prompt → Plan approval → AppSpec → Validation → Safe compiler
 Browser
   └─ Next.js / React Studio
       ├─ POST /api/generate
-      │   ├─ OpenAI Responses API（可选，服务端调用）
-      │   └─ Deterministic Agent（默认演示模式）
-      ├─ AppSpec validator + deterministic compiler
+      │   ├─ OpenAI Responses API（第一优先级，服务端调用）
+      │   └─ Deterministic Agent（仅 CRUD 无密钥演示）
+      ├─ 503 OPENAI_NOT_CONFIGURED
+      │   └─ Browser → 127.0.0.1 Codex Bridge → codex exec
+      │                                           └─ 本机 ChatGPT 订阅会话
+      ├─ AppSpec compiler / WebAppArtifact runtime
       ├─ sandboxed iframe + postMessage
       ├─ POST /api/export → standalone ZIP
       ├─ /api/auth/* → GitHub OAuth + D1 sessions
@@ -76,16 +87,18 @@ Next.js application
 - **Cloudflare D1**：保存用户、可撤销 Session、匿名或账号 workspace 下的项目、当前记录和版本快照。
 - **Drizzle schema / SQL migrations**：数据库结构的唯一来源。
 - **OpenAI Responses API（可选）**：只在服务端调用，密钥不会进入浏览器或导出包。
+- **本机 Codex Bridge（可选）**：只监听 `127.0.0.1`，通过 `codex exec` 复用本机 Codex 登录；Cloudflare 只收到最终项目产物。
+- **Provider 路由**：线上 API Key 优先；只有服务端明确返回 `OPENAI_NOT_CONFIGURED` 时，浏览器才请求本机 Bridge。
 
 换句话说，Cloudflare 在这里负责“运行与存储”，Next.js/React 才是前后端应用框架。
 
-## 安全边界
+## Demo 边界
 
-模型只生成声明式数据，不能直接生成并执行任意 JavaScript。
+CRUD 模式仍维持原有的声明式安全边界；Web App 模式为了验证真实代码生成，会在 sandbox iframe 中执行模型生成的 JavaScript。
 
-- `AppSpec`、字段、颜色和记录都经过运行时校验。
+- `AppSpec`、`WebAppArtifact` 和记录都经过基础运行时结构校验。
 - 编译器固定在仓库内，不使用 `eval` 或 `new Function`。
-- Preview 使用 CSP、sandbox、JSON 安全转义和 `textContent`。
+- CRUD Preview 使用 CSP、JSON 安全转义和 `textContent`；两种 Preview 都保留 iframe sandbox。
 - 历史版本禁止直接编辑；恢复会创建新版本。
 - 新 Spec 会迁移兼容记录，删除过的字段不会让下一版崩溃。
 - 写接口限制 JSON 请求体大小，并在服务端再次校验 `spec + records`。
@@ -95,7 +108,9 @@ Next.js application
 - 登录 Session 使用随机 Token；浏览器只保存 `HttpOnly` Cookie，D1 只保存 SHA-256 哈希。
 - 所有项目归属都在服务端解析，前端不能通过提交 `userId` 越权访问。
 
-这是笔试 Demo，包含 GitHub 登录和账号级项目同步，但不包含团队权限、企业 SSO 或组织管理。公网 Demo 不应直接挂载无限额模型密钥；生产化仍需要 Cloudflare Rate Limiting / Turnstile 和模型额度策略。
+Web App 导出后将脱离 Studio iframe，公开发布前应自行审阅生成代码。
+
+这是笔试 Demo，当前迭代优先证明“真实模型 → 可运行应用 → 保存/版本/导出”的完整链路。团队权限、企业 SSO、生成代码扫描、独立预览域、Prompt Injection 防护、内容审核、Rate Limiting、Turnstile、模型额度、流式进度、取消任务、多文件编辑器、代码 Diff、自动修复循环和精细错误体验均暂缓实现。
 
 ## 本地运行
 
@@ -126,6 +141,25 @@ GITHUB_CLIENT_SECRET=your_github_oauth_client_secret
 ```
 
 没有这两个值时，访客项目保存和其他生成能力仍可使用。
+
+### 使用 ChatGPT/Codex 订阅生成 Web App
+
+不需要 API Key。先确认本机 Codex 已通过 ChatGPT 登录，然后启动 Bridge：
+
+```bash
+codex login status
+npm run model:bridge
+```
+
+保持这个终端运行，再打开线上 Demo：
+
+```text
+https://chance-atoms-demo.chanceflying1.workers.dev
+```
+
+输入“构造一个贪吃蛇前端应用”并确认构建。页面会先请求线上 `/api/generate`；线上没有 API Key 时才自动调用本机 Bridge。生成结果随后照常保存到线上 D1，刷新页面后仍可找回。
+
+Bridge 需要本机已安装 `codex` CLI，默认监听 `http://127.0.0.1:4317`。它不会读取或上传 `auth.json`，而是让 Codex CLI 自己复用已保存的登录状态。
 
 不要把 `.env.local`、`.dev.vars` 或任何密钥提交到 Git。
 
@@ -211,7 +245,9 @@ https://chance-atoms-demo.chanceflying1.workers.dev/api/auth/github/callback
 ## 关键目录
 
 - `app/components/Studio.tsx`：首页、计划、Agent 对话、版本列表和 Preview 工作台。
-- `app/api/generate/route.ts`：模型适配、严格 JSON Schema 与本地降级。
+- `app/api/generate/route.ts`：线上 OpenAI 优先路由、严格 JSON Schema 与 CRUD 本地降级。
+- `scripts/codex-session-bridge.mjs`：浏览器可访问的本机 Codex 订阅桥接。
+- `scripts/web-app-artifact.schema.json`：Codex 结构化输出 Schema。
 - `app/api/auth/`：GitHub OAuth、Session 查询和退出登录。
 - `app/api/projects/`：项目、版本、记录保存和回滚 API。
 - `app/api/export/route.ts`：独立项目 ZIP 下载接口。
@@ -229,7 +265,7 @@ https://chance-atoms-demo.chanceflying1.workers.dev/api/auth/github/callback
 
 | Method | Path | 用途 |
 | --- | --- | --- |
-| `POST` | `/api/generate` | 从 prompt 或 refinement 生成 AppSpec |
+| `POST` | `/api/generate` | 从 prompt 或 refinement 生成 AppSpec / WebAppArtifact；线上 OpenAI 优先 |
 | `GET` | `/api/auth/github` | 发起 GitHub OAuth 登录 |
 | `GET` | `/api/auth/github/callback` | 校验 OAuth 回调、创建 Session 并认领访客项目 |
 | `GET` | `/api/auth/session` | 查询当前登录用户 |
@@ -241,15 +277,18 @@ https://chance-atoms-demo.chanceflying1.workers.dev/api/auth/github/callback
 
 ## 当前取舍与后续方向
 
-当前版本聚焦“单实体内部工具”，把生成、运行、持久化、版本和独立导出闭环做完整。继续生产化时可以扩展：
+当前版本聚焦把生成、运行、持久化、版本和独立导出闭环做完整。继续生产化时可以扩展：
 
 - 多实体关系与可组合组件；
 - 团队协作、企业 SSO 和细粒度权限；
 - Cloudflare Rate Limiting / Turnstile 和模型预算；
 - 版本 Diff、异步任务和公开分享；
-- Playwright Chromium/WebKit 端到端测试。
+- Playwright Chromium/WebKit 端到端测试；
+- 生成代码静态扫描、外部资源白名单与独立预览域；
+- 流式输出、取消/重试、自动修复和多文件工程生成；
+- 本机 Bridge 的配对授权、健康状态 UI 与多任务队列。
 
-这些扩展不会改变当前 `AppSpec → Validator → Compiler` 的安全边界。
+CRUD 会继续保留 `AppSpec → Validator → Compiler` 边界；Web App 则逐步补齐生成代码的审查和隔离能力。
 
 ## License
 

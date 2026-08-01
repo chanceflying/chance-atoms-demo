@@ -1,6 +1,11 @@
-import type { AppRecord, AppSpec } from "./domain";
+import type { AppRecord, AppSpec, StoredArtifact, WebAppArtifact } from "./domain";
 import { compileAppToHtml } from "./compile-app";
-import { parseAppSpec, parseRecords } from "./validation";
+import {
+  isWebAppArtifact,
+  parseAppSpec,
+  parseRecords,
+  parseStoredArtifact,
+} from "./validation";
 
 const UTF8_FLAG = 0x0800;
 const STORED_METHOD = 0;
@@ -10,7 +15,8 @@ const MAX_ARCHIVE_BYTES = 5 * 1024 * 1024;
 const SAFE_PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export interface StandaloneProjectInput {
-  spec: unknown;
+  spec?: unknown;
+  artifact?: unknown;
   records?: unknown;
   projectId?: unknown;
 }
@@ -130,7 +136,7 @@ function addStandalonePersistence(html: string, storageKey: string): string {
   return `${html.slice(0, insertionPoint)}\n${standalonePersistenceScript(storageKey)}${html.slice(insertionPoint)}`;
 }
 
-function createReadme(spec: AppSpec): string {
+function createDataAppReadme(spec: AppSpec): string {
   const title = markdownText(spec.title);
   const description = markdownText(spec.description);
   return `# ${title}
@@ -164,6 +170,55 @@ npx serve .
 
 此导出包是单用户、设备本地的静态版本。多人协作、云端数据库、AI 再生成和版本回滚仍由 Chance Atoms Demo 主应用提供。
 `;
+}
+
+function createWebAppReadme(artifact: WebAppArtifact): string {
+  const title = markdownText(artifact.title);
+  const description = markdownText(artifact.description);
+  return `# ${title}
+
+${description}
+
+这是由 Chance Atoms Demo 导出的独立 Web App。
+
+## 运行
+
+建议在当前目录启动任意静态文件服务：
+
+\`\`\`bash
+npx serve .
+\`\`\`
+
+也可以直接双击 \`index.html\` 预览；如果浏览器限制本地文件能力，请改用静态文件服务。
+
+## 项目文件
+
+- \`index.html\`：生成模型输出的完整网页，CSS 与 JavaScript 已内嵌。
+- \`artifact.json\`：本次生成所保存的 Web App Artifact 与验收标准。
+
+## 数据与安全
+
+- 导出包不包含 API 密钥，也不会连接 Chance Atoms Demo 的项目数据库。
+- 网页按生成时的完整状态独立运行；浏览器端数据行为由 \`index.html\` 自身实现。
+- 在公开部署前，请根据实际用途复核页面交互、外部资源和浏览器权限。
+`;
+}
+
+function parseExportArtifact(input: StandaloneProjectInput): StoredArtifact {
+  const value = input.artifact ?? input.spec;
+  if (
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && (value as { kind?: unknown }).kind === "web_app"
+  ) {
+    try {
+      return parseStoredArtifact(value);
+    } catch {
+      throw new TypeError("artifact must be a valid Web App Artifact");
+    }
+  }
+  return parseAppSpec(value);
 }
 
 function normalizeArchivePath(name: string): string {
@@ -305,9 +360,24 @@ export function createZipArchive(files: StandaloneProjectFile[]): Uint8Array {
 export function createStandaloneProject(
   input: StandaloneProjectInput,
 ): StandaloneProjectExport {
-  const spec = parseAppSpec(input.spec);
-  const records: AppRecord[] = parseRecords(input.records ?? spec.seedData, spec);
+  const artifact = parseExportArtifact(input);
   const projectId = assertSafeProjectId(input.projectId);
+
+  if (isWebAppArtifact(artifact)) {
+    const files: StandaloneProjectFile[] = [
+      { name: "index.html", content: artifact.html },
+      { name: "artifact.json", content: `${JSON.stringify(artifact, null, 2)}\n` },
+      { name: "README.md", content: createWebAppReadme(artifact) },
+    ];
+    return {
+      fileName: `${slugify(artifact.title)}-standalone.zip`,
+      files,
+      archive: createZipArchive(files),
+    };
+  }
+
+  const spec = artifact;
+  const records: AppRecord[] = parseRecords(input.records ?? spec.seedData, spec);
   const specFingerprint = crc32(encoder.encode(JSON.stringify(spec)))
     .toString(16)
     .padStart(8, "0");
@@ -319,7 +389,7 @@ export function createStandaloneProject(
   const files: StandaloneProjectFile[] = [
     { name: "index.html", content: html },
     { name: "app-spec.json", content: `${JSON.stringify(spec, null, 2)}\n` },
-    { name: "README.md", content: createReadme(spec) },
+    { name: "README.md", content: createDataAppReadme(spec) },
   ];
 
   return {

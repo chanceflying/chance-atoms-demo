@@ -10,7 +10,13 @@ import {
   useState,
 } from "react";
 
-import type { AppRecord, AppSpec } from "@/lib/app-spec";
+import {
+  isWebAppArtifact,
+  parseStoredArtifact,
+  type StoredArtifact,
+  type WebAppArtifact,
+} from "@/lib";
+import type { AppRecord } from "@/lib/app-spec";
 import { compileAppToHtml } from "@/lib/generator";
 import { reconcileRecordsForSpec } from "@/lib/reconcile-records";
 
@@ -19,6 +25,8 @@ type InspectorTab = "preview" | "code" | "spec";
 type PreviewSize = "desktop" | "mobile";
 type PersistStatus = "idle" | "saving" | "saved" | "error";
 type RetryAction = "projects" | "versions" | "build" | "rollback" | null;
+type ArtifactKind = "data_app" | "web_app";
+type BridgeStatus = "idle" | "checking" | "available" | "unavailable";
 
 type ProjectItem = {
   id: string;
@@ -36,7 +44,7 @@ type VersionItem = {
   ordinal: number;
   prompt: string;
   instruction: string | null;
-  spec: AppSpec;
+  artifact: StoredArtifact;
   records: AppRecord[];
   provider: string | null;
   model: string | null;
@@ -47,9 +55,10 @@ type VersionItem = {
 
 type PendingBuild = {
   kind: "new" | "refine";
+  artifactKind: ArtifactKind;
   prompt: string;
   instruction?: string;
-  previousSpec?: AppSpec;
+  previousArtifact?: StoredArtifact;
   projectId?: string;
 };
 
@@ -72,8 +81,8 @@ type ConversationMessage = {
 };
 
 type GenerateResponse = {
-  spec: AppSpec;
-  provider: "openai" | "local";
+  artifact: StoredArtifact;
+  provider: "codex_session" | "openai" | "local";
   model: string | null;
   warning: string | null;
   stages: string[];
@@ -125,6 +134,21 @@ const BUILDING_STAGES = [
   "准备可运行预览",
 ];
 
+const LOCAL_CODEX_BRIDGE = "http://127.0.0.1:4317";
+const LOCAL_BRIDGE_TIMEOUT_MS = 1_200;
+const WEB_APP_PROMPT =
+  /(贪吃蛇|小游戏|游戏|game|snake|计算器|calculator|计时器|timer|时钟|clock|落地页|landing\s*page|互动网页|interactive\s+(?:page|app))/i;
+
+class ResponseError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | null,
+  ) {
+    super(message);
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -155,9 +179,12 @@ function parseJson(value: unknown): unknown {
   }
 }
 
-function parseAppSpec(value: unknown): AppSpec | null {
-  const parsed = parseJson(value);
-  return isRecord(parsed) ? (parsed as unknown as AppSpec) : null;
+function parseArtifact(value: unknown): StoredArtifact | null {
+  try {
+    return parseStoredArtifact(parseJson(value));
+  } catch {
+    return null;
+  }
 }
 
 function parseRecords(value: unknown): AppRecord[] {
@@ -223,8 +250,10 @@ function normalizeVersion(
 ): VersionItem | null {
   const row = unwrapObject(value, ["version", "data"]);
   if (!row) return null;
-  const spec = parseAppSpec(row.spec ?? row.appSpec ?? row.app_spec);
-  if (!spec) return null;
+  const artifact = parseArtifact(
+    row.artifact ?? row.spec ?? row.appSpec ?? row.app_spec,
+  );
+  if (!artifact) return null;
   const ordinal = readNumber(
     row.ordinal ?? row.version ?? row.versionNumber ?? row.version_number,
     fallbackOrdinal,
@@ -237,7 +266,7 @@ function normalizeVersion(
     ordinal,
     prompt: readString(row.prompt ?? row.originalPrompt),
     instruction: readNullableString(row.instruction),
-    spec,
+    artifact,
     records: parseRecords(row.records ?? row.recordsJson ?? row.records_json),
     provider: readNullableString(row.provider),
     model: readNullableString(row.model),
@@ -256,25 +285,29 @@ function sortVersions(items: VersionItem[]): VersionItem[] {
   });
 }
 
-function getSpecTitle(spec: AppSpec, fallback = "未命名应用"): string {
-  const row = spec as unknown as Record<string, unknown>;
+function getArtifactTitle(
+  artifact: StoredArtifact,
+  fallback = "未命名应用",
+): string {
+  const row = artifact as unknown as Record<string, unknown>;
   return readString(row.name ?? row.title ?? row.appName, fallback).trim() || fallback;
 }
 
-function getSpecDescription(spec: AppSpec): string {
-  const row = spec as unknown as Record<string, unknown>;
+function getArtifactDescription(artifact: StoredArtifact): string {
+  const row = artifact as unknown as Record<string, unknown>;
   return readString(row.description ?? row.subtitle);
 }
 
-function getSpecSeedData(spec: AppSpec): AppRecord[] {
-  const row = spec as unknown as Record<string, unknown>;
+function getArtifactSeedData(artifact: StoredArtifact): AppRecord[] {
+  if (isWebAppArtifact(artifact)) return [];
+  const row = artifact as unknown as Record<string, unknown>;
   return parseRecords(row.seedData ?? row.seed_data);
 }
 
-function deriveProjectName(prompt: string, spec?: AppSpec): string {
-  if (spec) {
-    const specTitle = getSpecTitle(spec, "");
-    if (specTitle) return specTitle.slice(0, 32);
+function deriveProjectName(prompt: string, artifact?: StoredArtifact): string {
+  if (artifact) {
+    const artifactTitle = getArtifactTitle(artifact, "");
+    if (artifactTitle) return artifactTitle.slice(0, 32);
   }
   const clean = prompt
     .replace(/[，。！？、,.!?]/g, " ")
@@ -284,6 +317,26 @@ function deriveProjectName(prompt: string, spec?: AppSpec): string {
 }
 
 function makePlan(build: PendingBuild): PlanStep[] {
+  if (build.artifactKind === "web_app") {
+    return [
+      {
+        title: "梳理玩法与目标",
+        detail: "确认核心交互、完成条件和用户操作路径。",
+      },
+      {
+        title: "设计页面与状态",
+        detail: "组织视觉层级、组件状态和桌面与移动端布局。",
+      },
+      {
+        title: "实现完整交互",
+        detail: "由代码生成模型编写可独立运行的 HTML、CSS 与 JavaScript。",
+      },
+      {
+        title: "检查并准备预览",
+        detail: "验证启动、主要交互和导出文件，随后装入安全预览。",
+      },
+    ];
+  }
   const focus = build.kind === "new" ? "建立应用骨架" : "保留现有能力并增量调整";
   return [
     {
@@ -303,6 +356,16 @@ function makePlan(build: PendingBuild): PlanStep[] {
       detail: "装入示例数据，完成桌面与移动尺寸下的可运行预览。",
     },
   ];
+}
+
+function inferredArtifactKind(prompt: string): ArtifactKind {
+  return WEB_APP_PROMPT.test(prompt) ? "web_app" : "data_app";
+}
+
+function providerLabel(provider: string | null): string {
+  if (provider === "codex_session") return "本机 Codex";
+  if (provider === "openai") return "OpenAI";
+  return "本地规则";
 }
 
 function makeId(prefix: string): string {
@@ -353,7 +416,8 @@ async function requestJson(url: string, init?: RequestInit): Promise<unknown> {
     const message = isRecord(payload)
       ? readString(payload.error ?? payload.message, `请求失败（${response.status}）`)
       : readString(payload, `请求失败（${response.status}）`);
-    throw new Error(message);
+    const code = isRecord(payload) ? readNullableString(payload.code) : null;
+    throw new ResponseError(message, response.status, code);
   }
   return payload;
 }
@@ -362,14 +426,79 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
+async function generateWithLocalCodex(build: PendingBuild): Promise<GenerateResponse> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), LOCAL_BRIDGE_TIMEOUT_MS);
+
+  try {
+    const healthResponse = await fetch(`${LOCAL_CODEX_BRIDGE}/health`, {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+      mode: "cors",
+      signal: controller.signal,
+    });
+    const health = await readResponse(healthResponse);
+    if (!healthResponse.ok || !isRecord(health) || health.status !== "ok") {
+      throw new Error("本机 Codex bridge 尚未就绪");
+    }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("未检测到本机 Codex bridge，请先启动本地生成服务。 ");
+    }
+    throw new Error(
+      getErrorMessage(error, "未检测到本机 Codex bridge，请先启动本地生成服务。"),
+    );
+  } finally {
+    window.clearTimeout(timeout);
+  }
+
+  const response = await fetch(`${LOCAL_CODEX_BRIDGE}/generate`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    mode: "cors",
+    body: JSON.stringify({
+      prompt: build.prompt,
+      ...(build.instruction ? { instruction: build.instruction } : {}),
+      previousArtifact: build.previousArtifact ?? null,
+    }),
+  });
+  const payload = await readResponse(response);
+  if (!response.ok) {
+    const message = isRecord(payload)
+      ? readString(payload.error ?? payload.message, "本机 Codex 生成失败。")
+      : "本机 Codex 生成失败。";
+    throw new Error(message);
+  }
+
+  const artifact = isRecord(payload)
+    ? parseArtifact(payload.artifact ?? payload.spec)
+    : null;
+  if (!artifact || !isWebAppArtifact(artifact)) {
+    throw new Error("本机 Codex 返回的 Web App 结构无效。 ");
+  }
+
+  return {
+    artifact: artifact as WebAppArtifact,
+    provider: "codex_session",
+    model: isRecord(payload)
+      ? readNullableString(payload.model) ?? "Codex subscription"
+      : "Codex subscription",
+    warning: isRecord(payload) ? readNullableString(payload.warning) : null,
+    stages: isRecord(payload) && Array.isArray(payload.stages)
+      ? payload.stages.filter((item): item is string => typeof item === "string")
+      : ["本机 Codex 生成", "结构校验", "准备预览"],
+  };
+}
+
 function safeCompile(
-  spec: AppSpec | null,
+  artifact: StoredArtifact | null,
   records: AppRecord[],
   projectId: string,
 ): string {
-  if (!spec) return "";
+  if (!artifact) return "";
+  if (isWebAppArtifact(artifact)) return artifact.html;
   try {
-    return compileAppToHtml(spec, records, projectId);
+    return compileAppToHtml(artifact, records, projectId);
   } catch (error) {
     const message = getErrorMessage(error, "预览编译失败");
     return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><style>body{font-family:system-ui;padding:40px;color:#24262b}main{max-width:560px;margin:auto;border:1px solid #ddd;border-radius:16px;padding:24px}p{color:#666}</style><main><h1>预览暂不可用</h1><p>${message.replace(/[<>&]/g, "")}</p></main></html>`;
@@ -379,6 +508,9 @@ function safeCompile(
 export default function Studio() {
   const [phase, setPhase] = useState<StudioPhase>("home");
   const [prompt, setPrompt] = useState("");
+  const [artifactKind, setArtifactKind] = useState<ArtifactKind>("data_app");
+  const [artifactKindManuallySelected, setArtifactKindManuallySelected] = useState(false);
+  const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>("idle");
   const [instruction, setInstruction] = useState("");
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -428,8 +560,8 @@ export default function Studio() {
   );
 
   const previewHtml = useMemo(
-    () => safeCompile(activeVersion?.spec ?? null, records, activeProject?.id ?? "draft"),
-    [activeProject?.id, activeVersion?.spec, records],
+    () => safeCompile(activeVersion?.artifact ?? null, records, activeProject?.id ?? "draft"),
+    [activeProject?.id, activeVersion?.artifact, records],
   );
 
   const showNotice = useCallback((text: string, tone: Notice["tone"] = "success") => {
@@ -599,6 +731,7 @@ export default function Studio() {
     setPlan([]);
     setMessages([]);
     setInstruction("");
+    setBridgeStatus("idle");
     setErrorMessage(null);
     setRetryAction(null);
     setPersistStatus("idle");
@@ -612,7 +745,15 @@ export default function Studio() {
       setRetryAction(null);
       return;
     }
-    const build: PendingBuild = { kind: "new", prompt: cleanPrompt };
+    const resolvedArtifactKind = artifactKindManuallySelected
+      ? artifactKind
+      : inferredArtifactKind(cleanPrompt);
+    setArtifactKind(resolvedArtifactKind);
+    const build: PendingBuild = {
+      kind: "new",
+      artifactKind: resolvedArtifactKind,
+      prompt: cleanPrompt,
+    };
     setPendingBuild(build);
     setPlan(makePlan(build));
     setMessages([
@@ -627,7 +768,7 @@ export default function Studio() {
     setErrorMessage(null);
     setRetryAction(null);
     setPhase("planning");
-  }, [prompt]);
+  }, [artifactKind, artifactKindManuallySelected, prompt]);
 
   const beginRefinePlan = useCallback(() => {
     if (accountSwitchingRef.current) return;
@@ -640,9 +781,13 @@ export default function Studio() {
     }
     const build: PendingBuild = {
       kind: "refine",
-      prompt: activeProject.prompt || activeVersion.prompt || getSpecTitle(activeVersion.spec),
+      artifactKind: isWebAppArtifact(activeVersion.artifact) ? "web_app" : "data_app",
+      prompt:
+        activeProject.prompt
+        || activeVersion.prompt
+        || getArtifactTitle(activeVersion.artifact),
       instruction: cleanInstruction,
-      previousSpec: activeVersion.spec,
+      previousArtifact: activeVersion.artifact,
       projectId: activeProject.id,
     };
     setPendingBuild(build);
@@ -674,7 +819,8 @@ export default function Studio() {
         {
           method: "POST",
           body: JSON.stringify({
-            spec: generated.spec,
+            artifact: generated.artifact,
+            spec: generated.artifact,
             records: nextRecords,
             prompt: build.prompt,
             instruction: build.instruction ?? null,
@@ -703,7 +849,7 @@ export default function Studio() {
         ordinal: (latestVersion?.ordinal ?? 0) + 1,
         prompt: build.prompt,
         instruction: build.instruction ?? null,
-        spec: generated.spec,
+        artifact: generated.artifact,
         records: nextRecords,
         provider: generated.provider,
         model: generated.model,
@@ -730,35 +876,78 @@ export default function Studio() {
     setRetryAction(null);
     setInspectorTab("preview");
     try {
-      const generatedPayload = await requestJson("/api/generate", {
-        method: "POST",
-        body: JSON.stringify({
-          prompt: build.prompt,
-          ...(build.previousSpec ? { previousSpec: build.previousSpec } : {}),
-          ...(build.instruction ? { instruction: build.instruction } : {}),
-        }),
-      });
-      if (!isRecord(generatedPayload) || !parseAppSpec(generatedPayload.spec)) {
-        throw new Error("生成结果缺少可运行的应用描述，请重试。 ");
+      let generated: GenerateResponse;
+      try {
+        const generatedPayload = await requestJson("/api/generate", {
+          method: "POST",
+          body: JSON.stringify({
+            artifactKind: build.artifactKind === "web_app" ? "web_app" : "crud",
+            prompt: build.prompt,
+            ...(build.previousArtifact
+              ? {
+                  previousArtifact: build.previousArtifact,
+                  ...(build.artifactKind === "data_app"
+                    ? { previousSpec: build.previousArtifact }
+                    : {}),
+                }
+              : {}),
+            ...(build.instruction ? { instruction: build.instruction } : {}),
+          }),
+        });
+        if (!isRecord(generatedPayload)) {
+          throw new Error("生成结果缺少可运行的应用描述，请重试。 ");
+        }
+        const artifact = parseArtifact(generatedPayload.artifact ?? generatedPayload.spec);
+        if (!artifact) {
+          throw new Error("生成结果缺少可运行的应用描述，请重试。 ");
+        }
+        if (build.artifactKind === "web_app" && !isWebAppArtifact(artifact)) {
+          throw new Error("生成结果不是可运行的 Web App，请重试。 ");
+        }
+        if (build.artifactKind === "data_app" && isWebAppArtifact(artifact)) {
+          throw new Error("生成结果不是数据应用，请重试。 ");
+        }
+        const rawProvider = readString(generatedPayload.provider);
+        generated = {
+          artifact,
+          provider:
+            rawProvider === "openai"
+              ? "openai"
+              : rawProvider === "codex_session"
+                ? "codex_session"
+                : "local",
+          model: readNullableString(generatedPayload.model),
+          warning: readNullableString(generatedPayload.warning),
+          stages: Array.isArray(generatedPayload.stages)
+            ? generatedPayload.stages.filter(
+                (item: unknown): item is string => typeof item === "string",
+              )
+            : [],
+        };
+      } catch (error) {
+        const shouldUseLocalBridge =
+          build.artifactKind === "web_app"
+          && error instanceof ResponseError
+          && error.status === 503
+          && error.code === "OPENAI_NOT_CONFIGURED";
+        if (!shouldUseLocalBridge) throw error;
+
+        setBridgeStatus("checking");
+        try {
+          generated = await generateWithLocalCodex(build);
+          setBridgeStatus("available");
+        } catch (bridgeError) {
+          setBridgeStatus("unavailable");
+          throw bridgeError;
+        }
       }
-      const generated: GenerateResponse = {
-        spec: parseAppSpec(generatedPayload.spec) as AppSpec,
-        provider: generatedPayload.provider === "openai" ? "openai" : "local",
-        model: readNullableString(generatedPayload.model),
-        warning: readNullableString(generatedPayload.warning),
-        stages: Array.isArray(generatedPayload.stages)
-          ? generatedPayload.stages.filter(
-              (item: unknown): item is string => typeof item === "string",
-            )
-          : [],
-      };
 
       let project = activeProject;
       if (build.kind === "new") {
         const projectPayload = await requestJson("/api/projects", {
           method: "POST",
           body: JSON.stringify({
-            name: deriveProjectName(build.prompt, generated.spec),
+            name: deriveProjectName(build.prompt, generated.artifact),
             prompt: build.prompt,
           }),
         });
@@ -767,11 +956,13 @@ export default function Studio() {
       }
       if (!project) throw new Error("找不到要更新的项目，请返回首页重试。 ");
 
-      const generatedSeed = getSpecSeedData(generated.spec);
-      const nextRecords =
-        build.kind === "refine"
-          ? reconcileRecordsForSpec(records, generated.spec)
+      let nextRecords: AppRecord[] = [];
+      if (!isWebAppArtifact(generated.artifact)) {
+        const generatedSeed = getArtifactSeedData(generated.artifact);
+        nextRecords = build.kind === "refine"
+          ? reconcileRecordsForSpec(records, generated.artifact)
           : generatedSeed;
+      }
       const version = await persistVersion(project, generated, build, nextRecords);
       const nextVersions = sortVersions([
         version,
@@ -792,9 +983,11 @@ export default function Studio() {
           role: "agent",
           text:
             build.kind === "new"
-              ? `「${project.name}」已经生成。右侧是真实可操作的应用，你可以直接新增或编辑数据。`
+              ? isWebAppArtifact(generated.artifact)
+                ? `「${project.name}」已经生成。右侧是本次生成的完整 Web App，可以直接操作。`
+                : `「${project.name}」已经生成。右侧是真实可操作的应用，你可以直接新增或编辑数据。`
               : `调整完成，已保存为 v${version.ordinal}。旧版本仍在左侧，可以随时查看或恢复。`,
-          meta: generated.provider === "openai" ? "AI 生成" : "本地生成",
+          meta: `${providerLabel(generated.provider)} 生成`,
         },
       ]);
       setPhase("ready");
@@ -849,7 +1042,8 @@ export default function Studio() {
           body: JSON.stringify({
             action: "rollback",
             sourceVersionId: activeVersion.id,
-            spec: activeVersion.spec,
+            artifact: activeVersion.artifact,
+            spec: activeVersion.artifact,
             records,
             prompt: activeVersion.prompt || activeProject.prompt,
             instruction: `恢复 v${activeVersion.ordinal}`,
@@ -1031,7 +1225,8 @@ export default function Studio() {
         method: "POST",
         headers: { Accept: "application/zip", "Content-Type": "application/json" },
         body: JSON.stringify({
-          spec: activeVersion.spec,
+          artifact: activeVersion.artifact,
+          spec: activeVersion.artifact,
           records,
           projectId: activeProject.id,
         }),
@@ -1047,7 +1242,7 @@ export default function Studio() {
       const disposition = response.headers.get("content-disposition") ?? "";
       const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
       const quotedName = disposition.match(/filename="([^"]+)"/i)?.[1];
-      let fileName = `${getSpecTitle(activeVersion.spec, "forge-app")}.zip`;
+      let fileName = `${getArtifactTitle(activeVersion.artifact, "forge-app")}.zip`;
       try {
         fileName = encodedName ? decodeURIComponent(encodedName) : quotedName || fileName;
       } catch {
@@ -1075,6 +1270,7 @@ export default function Studio() {
       if (event.source !== iframeRef.current?.contentWindow || !isRecord(event.data)) return;
       if (event.data.source !== "forge-preview" || event.data.type !== "records-change") return;
       if (!activeProject || !activeVersion) return;
+      if (isWebAppArtifact(activeVersion.artifact)) return;
       if (accountSwitchingRef.current) return;
       if (isHistoricalVersion) {
         showNotice("历史版本为只读，请先恢复为新版本再编辑");
@@ -1117,6 +1313,20 @@ export default function Studio() {
       event.preventDefault();
       beginNewPlan();
     }
+  };
+
+  const handlePromptChange = (value: string) => {
+    setPrompt(value);
+    if (!artifactKindManuallySelected) {
+      setArtifactKind(inferredArtifactKind(value));
+      setBridgeStatus("idle");
+    }
+  };
+
+  const selectArtifactKind = (kind: ArtifactKind) => {
+    setArtifactKind(kind);
+    setArtifactKindManuallySelected(true);
+    setBridgeStatus("idle");
   };
 
   const submitNewProject = (event: FormEvent<HTMLFormElement>) => {
@@ -1177,7 +1387,7 @@ export default function Studio() {
             <span>现在就造出来。</span>
           </h1>
           <p className="forge-hero__lead">
-            描述你的工作场景。Forge 会先给出计划，确认后生成带数据与交互的应用。
+            描述你的工作场景。Forge 会先给出计划，确认后生成数据工具或完整 Web App。
           </p>
 
           <form className="prompt-composer" onSubmit={submitNewProject}>
@@ -1187,7 +1397,7 @@ export default function Studio() {
             <textarea
               id="forge-prompt"
               value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
+              onChange={(event) => handlePromptChange(event.target.value)}
               onKeyDown={handlePromptKeyDown}
               placeholder="例如：做一个客户线索管理工具，支持按跟进阶段筛选……"
               rows={4}
@@ -1195,6 +1405,47 @@ export default function Studio() {
               autoFocus
               disabled={accountSwitching}
             />
+            <div className="artifact-mode" aria-label="应用生成类型">
+              <span>生成类型</span>
+              <div className="artifact-mode__options" role="radiogroup" aria-label="选择应用类型">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={artifactKind === "data_app"}
+                  className={artifactKind === "data_app" ? "is-active" : ""}
+                  onClick={() => selectArtifactKind("data_app")}
+                  disabled={accountSwitching}
+                >
+                  数据应用
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={artifactKind === "web_app"}
+                  className={artifactKind === "web_app" ? "is-active" : ""}
+                  onClick={() => selectArtifactKind("web_app")}
+                  disabled={accountSwitching}
+                >
+                  Web App
+                </button>
+              </div>
+              {artifactKind === "web_app" ? (
+                <small className={`artifact-mode__provider artifact-mode__provider--${bridgeStatus}`}>
+                  <i aria-hidden="true" />
+                  {bridgeStatus === "checking"
+                    ? "正在连接本机 Codex"
+                    : bridgeStatus === "available"
+                      ? "本机 Codex 已连接"
+                      : bridgeStatus === "unavailable"
+                        ? "本机 Codex 未连接"
+                        : "优先 OpenAI · 未配置时使用本机 Codex"}
+                </small>
+              ) : (
+                <small className="artifact-mode__provider">
+                  <i aria-hidden="true" /> AppSpec 安全编译器
+                </small>
+              )}
+            </div>
             <div className="prompt-composer__footer">
               <span className="prompt-composer__hint">
                 <kbd>⌘</kbd><kbd>↵</kbd> 提交 · 可继续补充字段和筛选方式
@@ -1234,6 +1485,9 @@ export default function Studio() {
                 key={starter.title}
                 onClick={() => {
                   setPrompt(starter.prompt);
+                  setArtifactKind("data_app");
+                  setArtifactKindManuallySelected(true);
+                  setBridgeStatus("idle");
                   document.getElementById("forge-prompt")?.focus();
                 }}
               >
@@ -1533,7 +1787,9 @@ export default function Studio() {
                     <span className="section-heading__kicker">PROPOSED PLAN</span>
                     <h2 id="plan-title">执行计划</h2>
                   </div>
-                  <span className="plan-badge">4 steps</span>
+                  <span className="plan-badge">
+                    {pendingBuild.artifactKind === "web_app" ? "Web App" : "数据应用"} · 4 steps
+                  </span>
                 </div>
                 <p className="build-plan__brief">
                   {pendingBuild.kind === "new" ? pendingBuild.prompt : pendingBuild.instruction}
@@ -1556,7 +1812,9 @@ export default function Studio() {
                     <strong>版本安全</strong>
                     {pendingBuild.kind === "refine"
                       ? "这次调整会创建新版本，不会覆盖当前成果。"
-                      : "生成后可直接操作，所有数据变化都会自动保存。"}
+                      : pendingBuild.artifactKind === "web_app"
+                        ? "生成的完整网页会保存为项目版本，并支持继续调整和导出。"
+                        : "生成后可直接操作，所有数据变化都会自动保存。"}
                   </p>
                 </div>
                 <div className="build-plan__actions">
@@ -1614,15 +1872,24 @@ export default function Studio() {
                 <div className="build-summary__topline">
                   <span className="summary-icon" aria-hidden="true">✓</span>
                   <div>
-                    <strong>{getSpecTitle(activeVersion.spec, activeProject?.name)}</strong>
-                    <p>{getSpecDescription(activeVersion.spec) || "应用已生成并可以直接运行。"}</p>
+                    <strong>{getArtifactTitle(activeVersion.artifact, activeProject?.name)}</strong>
+                    <p>{getArtifactDescription(activeVersion.artifact) || "应用已生成并可以直接运行。"}</p>
                   </div>
+                  <span className={`provider-pill provider-pill--${activeVersion.provider ?? "local"}`}>
+                    {providerLabel(activeVersion.provider)}
+                  </span>
                   <span className="version-pill">v{activeVersion.ordinal}</span>
                 </div>
                 <div className="build-summary__stats">
-                  <span><strong>{getSpecSeedData(activeVersion.spec).length}</strong> 示例记录</span>
+                  {isWebAppArtifact(activeVersion.artifact) ? (
+                    <span><strong>Web</strong> 完整网页</span>
+                  ) : (
+                    <span><strong>{getArtifactSeedData(activeVersion.artifact).length}</strong> 示例记录</span>
+                  )}
                   <span><strong>Live</strong> 实时预览</span>
-                  <span><strong>Auto</strong> 自动保存</span>
+                  <span>
+                    <strong>{providerLabel(activeVersion.provider)}</strong> 生成来源
+                  </span>
                 </div>
                 {isHistoricalVersion ? (
                   <div className="history-callout">
@@ -1784,10 +2051,15 @@ export default function Studio() {
                 className="code-view code-view--spec"
               >
                 <div className="code-view__header">
-                  <span><i aria-hidden="true" /> app-spec.json</span>
+                  <span>
+                    <i aria-hidden="true" />
+                    {activeVersion && isWebAppArtifact(activeVersion.artifact)
+                      ? "artifact.json"
+                      : "app-spec.json"}
+                  </span>
                   <span>结构化描述</span>
                 </div>
-                <pre><code>{activeVersion ? JSON.stringify(activeVersion.spec, null, 2) : "{}"}</code></pre>
+                <pre><code>{activeVersion ? JSON.stringify(activeVersion.artifact, null, 2) : "{}"}</code></pre>
               </div>
             )}
           </div>

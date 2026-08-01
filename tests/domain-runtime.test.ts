@@ -3,16 +3,23 @@ import test from "node:test";
 
 import {
   AppSpecValidationError,
+  StoredArtifactValidationError,
   compileAppToHtml,
   deterministicAgent,
+  isWebAppArtifact,
   parseAppSpec,
+  parseRecordsForArtifact,
+  parseStoredArtifact,
   reconcileRecordsForSpec,
   validateAppSpec,
   validateProject,
   validateRecords,
+  validateStoredArtifact,
   validateVersion,
   type AppSpec,
+  type WebAppArtifact,
 } from "../lib/index";
+import { serializeProject, serializeVersion } from "../db/serializers";
 
 test("deterministic agent recognizes distinct English product prompts", () => {
   const bug = deterministicAgent("Build a bug tracker for a product team");
@@ -144,6 +151,88 @@ test("record, project, and version validation work at runtime", () => {
   assert.equal(validateProject(project).success, true);
   assert.equal(validateVersion(version).success, true);
   assert.equal(validateVersion({ ...version, number: 0 }).success, false);
+});
+
+test("stored artifacts accept legacy AppSpec and self-contained web apps", () => {
+  const legacy = deterministicAgent("Create a task tracker");
+  assert.deepEqual(parseStoredArtifact(legacy), legacy);
+  assert.equal(isWebAppArtifact(legacy), false);
+
+  const webApp: WebAppArtifact = {
+    schemaVersion: 1,
+    kind: "web_app",
+    title: "Snake",
+    description: "A playable snake game",
+    html: "<!doctype html><html><body><canvas></canvas><script></script></body></html>",
+    acceptanceCriteria: ["Arrow keys move the snake", "Restart begins a new game"],
+  };
+  assert.deepEqual(parseStoredArtifact(webApp), webApp);
+  assert.equal(isWebAppArtifact(webApp), true);
+  assert.equal(validateStoredArtifact(webApp).success, true);
+  assert.deepEqual(
+    parseRecordsForArtifact([{ id: "ignored", values: [] }], webApp),
+    [],
+  );
+  assert.equal(
+    validateVersion({
+      id: "version-web-1",
+      projectId: "project-web-1",
+      number: 1,
+      instruction: null,
+      spec: webApp,
+      createdAt: "2026-08-01T08:00:00.000Z",
+    }).success,
+    true,
+  );
+
+  assert.throws(
+    () => parseStoredArtifact({ ...webApp, html: "   " }),
+    StoredArtifactValidationError,
+  );
+  assert.equal(
+    validateStoredArtifact({ ...legacy, kind: "unknown" }).success,
+    false,
+  );
+});
+
+test("database serializers expose artifact aliases and clear web app records", () => {
+  const artifact: WebAppArtifact = {
+    schemaVersion: 1,
+    kind: "web_app",
+    title: "Snake",
+    description: "A playable snake game",
+    html: "<!doctype html><title>Snake</title>",
+    acceptanceCriteria: ["The game starts"],
+  };
+  const stored = JSON.stringify(artifact);
+  const row = {
+    id: "version-1",
+    project_id: "project-1",
+    workspace_id: "workspace-1",
+    title: "Snake",
+    prompt: "Build snake",
+    current_spec: stored,
+    spec: stored,
+    records: JSON.stringify([{ id: "stale", values: [] }]),
+    current_version: 1,
+    version: 1,
+    instruction: "",
+    provider: "openai",
+    model: "test-model",
+    warning: null,
+    stages: "[]",
+    created_at: "2026-08-01T08:00:00.000Z",
+    updated_at: "2026-08-01T08:00:00.000Z",
+  };
+
+  const project = serializeProject(row);
+  const version = serializeVersion(row);
+  assert.deepEqual(project.artifact, artifact);
+  assert.deepEqual(project.spec, artifact);
+  assert.deepEqual(project.records, []);
+  assert.deepEqual(version.artifact, artifact);
+  assert.deepEqual(version.spec, artifact);
+  assert.deepEqual(version.records, []);
 });
 
 test("compiler emits a complete, sandbox-friendly CRUD application", () => {

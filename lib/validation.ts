@@ -7,9 +7,11 @@ import {
   type FieldType,
   type Project,
   type ProjectStatus,
+  type StoredArtifact,
   type ValidationIssue,
   type ValidationResult,
   type Version,
+  type WebAppArtifact,
 } from "./domain";
 
 const FIELD_TYPE_SET = new Set<string>(FIELD_TYPES);
@@ -23,6 +25,7 @@ const FIELD_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,39}$/;
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 const RESERVED_FIELD_IDS = new Set(["__proto__", "prototype", "constructor"]);
+export const MAX_WEB_APP_HTML_LENGTH = 500_000;
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -36,6 +39,20 @@ export class AppSpecValidationError extends Error {
         .join("; ")}`,
     );
     this.name = "AppSpecValidationError";
+    this.issues = issues;
+  }
+}
+
+export class StoredArtifactValidationError extends Error {
+  readonly issues: ValidationIssue[];
+
+  constructor(issues: ValidationIssue[]) {
+    super(
+      `Invalid stored artifact: ${issues
+        .map((entry) => `${entry.path}: ${entry.message}`)
+        .join("; ")}`,
+    );
+    this.name = "StoredArtifactValidationError";
     this.issues = issues;
   }
 }
@@ -359,6 +376,94 @@ export function isAppSpec(input: unknown): input is AppSpec {
   return validateAppSpec(input).success;
 }
 
+export function validateWebAppArtifact(
+  input: unknown,
+): ValidationResult<WebAppArtifact> {
+  const issues: ValidationIssue[] = [];
+  if (!isObject(input)) {
+    return { success: false, issues: [{ path: "$", message: "must be an object" }] };
+  }
+
+  if (input.schemaVersion !== 1) {
+    issue(issues, "schemaVersion", "must equal 1");
+  }
+  if (input.kind !== "web_app") {
+    issue(issues, "kind", "must equal web_app");
+  }
+
+  let html = "";
+  if (typeof input.html !== "string") {
+    issue(issues, "html", "must be a string");
+  } else {
+    html = input.html;
+    if (html.trim().length === 0) {
+      issue(issues, "html", "must contain a complete HTML document");
+    }
+    if (html.length > MAX_WEB_APP_HTML_LENGTH) {
+      issue(
+        issues,
+        "html",
+        `must contain at most ${MAX_WEB_APP_HTML_LENGTH} characters`,
+      );
+      html = html.slice(0, MAX_WEB_APP_HTML_LENGTH);
+    }
+  }
+
+  const artifact: WebAppArtifact = {
+    schemaVersion: 1,
+    kind: "web_app",
+    title: stringValue(input.title, "title", issues, { max: 100 }),
+    description: stringValue(input.description, "description", issues, { max: 360 }),
+    html,
+    acceptanceCriteria: stringArray(
+      input.acceptanceCriteria,
+      "acceptanceCriteria",
+      issues,
+      { min: 1, max: 12, itemMax: 240 },
+    ),
+  };
+
+  return issues.length > 0
+    ? { success: false, issues }
+    : { success: true, data: artifact };
+}
+
+export function isWebAppArtifact(input: unknown): input is WebAppArtifact {
+  return validateWebAppArtifact(input).success;
+}
+
+export function validateStoredArtifact(
+  input: unknown,
+): ValidationResult<StoredArtifact> {
+  if (isObject(input) && Object.hasOwn(input, "kind")) {
+    if (input.kind === "web_app") return validateWebAppArtifact(input);
+    return {
+      success: false,
+      issues: [{ path: "kind", message: "must equal web_app when provided" }],
+    };
+  }
+  return validateAppSpec(input);
+}
+
+export function parseStoredArtifact(input: unknown): StoredArtifact {
+  const result = validateStoredArtifact(input);
+  if (!result.success) throw new StoredArtifactValidationError(result.issues);
+  return result.data;
+}
+
+export function isStoredArtifact(input: unknown): input is StoredArtifact {
+  return validateStoredArtifact(input).success;
+}
+
+/** Web apps persist generated source/version metadata, not runtime CRUD rows. */
+export function parseRecordsForArtifact(
+  input: unknown,
+  artifactInput: StoredArtifact,
+): AppRecord[] {
+  const artifact = parseStoredArtifact(artifactInput);
+  return isWebAppArtifact(artifact) ? [] : parseRecords(input, artifact);
+}
+
 export function validateRecords(
   input: unknown,
   specInput: AppSpec,
@@ -457,10 +562,10 @@ export function validateVersion(input: unknown): ValidationResult<Version> {
   if (typeof number !== "number" || !Number.isInteger(number) || number < 1) {
     issue(issues, "number", "must be a positive integer");
   }
-  const specResult = validateAppSpec(input.spec);
-  if (!specResult.success) {
-    for (const specIssue of specResult.issues) {
-      issue(issues, `spec.${specIssue.path}`, specIssue.message);
+  const artifactResult = validateStoredArtifact(input.spec);
+  if (!artifactResult.success) {
+    for (const artifactIssue of artifactResult.issues) {
+      issue(issues, `spec.${artifactIssue.path}`, artifactIssue.message);
     }
   }
   const createdAt = stringValue(input.createdAt, "createdAt", issues, { max: 40 });
@@ -470,7 +575,7 @@ export function validateVersion(input: unknown): ValidationResult<Version> {
     projectId,
     number: typeof number === "number" ? number : 1,
     instruction: nullableString(input.instruction, "instruction", issues, 2_000),
-    spec: specResult.success ? specResult.data : (input.spec as AppSpec),
+    spec: artifactResult.success ? artifactResult.data : (input.spec as StoredArtifact),
     createdAt,
   };
   return issues.length > 0 ? { success: false, issues } : { success: true, data: version };

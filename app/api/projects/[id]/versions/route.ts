@@ -17,8 +17,12 @@ import {
   serializeVersion,
   type DatabaseRow,
 } from "../../../../../db/serializers";
-import type { AppSpec } from "@/lib/domain";
-import { parseAppSpec, parseRecords } from "@/lib/validation";
+import {
+  isWebAppArtifact,
+  parseRecordsForArtifact,
+  parseStoredArtifact,
+  type StoredArtifact,
+} from "@/lib";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -72,18 +76,24 @@ export async function POST(request: Request, { params }: RouteContext) {
     const prompt = optionalString(payload, "prompt", 20_000);
     const instruction =
       optionalString(payload, "instruction", 20_000) ?? prompt ?? "";
-    const hasSpec =
-      Object.hasOwn(payload, "spec") || Object.hasOwn(payload, "currentSpec");
-    const rawSpec = Object.hasOwn(payload, "spec")
-      ? payload.spec
-      : payload.currentSpec;
+    const hasArtifact =
+      Object.hasOwn(payload, "artifact")
+      || Object.hasOwn(payload, "spec")
+      || Object.hasOwn(payload, "currentSpec");
+    const rawArtifact = Object.hasOwn(payload, "artifact")
+      ? payload.artifact
+      : Object.hasOwn(payload, "spec")
+        ? payload.spec
+        : payload.currentSpec;
     const db = await ensureDatabase();
-    const parsedSpec = hasSpec ? validSpec(rawSpec) : null;
-    const spec = parsedSpec ? jsonText(parsedSpec, {}) : null;
-    let records: string | null = null;
+    const parsedArtifact = hasArtifact ? validArtifact(rawArtifact) : null;
+    const spec = parsedArtifact ? jsonText(parsedArtifact, {}) : null;
+    let records: string | null = parsedArtifact && isWebAppArtifact(parsedArtifact)
+      ? "[]"
+      : null;
     if (Object.hasOwn(payload, "records")) {
-      let recordsSpec = parsedSpec;
-      if (!recordsSpec) {
+      let recordsArtifact = parsedArtifact;
+      if (!recordsArtifact) {
         const current = await db
           .prepare(`
             SELECT current_spec
@@ -95,9 +105,12 @@ export async function POST(request: Request, { params }: RouteContext) {
         if (!current) {
           return jsonResponse(workspace, { error: "Project not found" }, { status: 404 });
         }
-        recordsSpec = validSpec(parseStoredJson(current.current_spec, {}));
+        recordsArtifact = validArtifact(parseStoredJson(current.current_spec, {}));
       }
-      records = jsonText(validRecords(payload.records, recordsSpec), []);
+      records = jsonText(
+        validRecordsForArtifact(payload.records, recordsArtifact),
+        [],
+      );
     }
     const provider = optionalString(payload, "provider", 80) ?? null;
     const model = optionalString(payload, "model", 120) ?? null;
@@ -205,8 +218,11 @@ export async function PATCH(request: Request, { params }: RouteContext) {
         { status: 409 },
       );
     }
-    const currentSpec = validSpec(parseStoredJson(current.spec, {}));
-    const records = jsonText(validRecords(payload.records, currentSpec), []);
+    const currentArtifact = validArtifact(parseStoredJson(current.spec, {}));
+    const records = jsonText(
+      validRecordsForArtifact(payload.records, currentArtifact),
+      [],
+    );
     const results = await db.batch<DatabaseRow>([
       db
         .prepare(`
@@ -248,19 +264,19 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   }
 }
 
-function validSpec(value: unknown): AppSpec {
+function validArtifact(value: unknown): StoredArtifact {
   try {
-    return parseAppSpec(value);
+    return parseStoredArtifact(value);
   } catch {
-    throw new RequestError(400, "spec must be a valid AppSpec");
+    throw new RequestError(400, "spec must be a valid stored artifact");
   }
 }
 
-function validRecords(value: unknown, spec: AppSpec) {
+function validRecordsForArtifact(value: unknown, artifact: StoredArtifact) {
   try {
-    return parseRecords(value, spec);
+    return parseRecordsForArtifact(value, artifact);
   } catch {
-    throw new RequestError(400, "records must match the current AppSpec");
+    throw new RequestError(400, "records must match the current artifact");
   }
 }
 
@@ -292,6 +308,11 @@ async function rollbackVersion(
       { status: 404 },
     );
   }
+  const sourceArtifact = validArtifact(parseStoredJson(source.spec, {}));
+  const sourceRecords = jsonText(
+    validRecordsForArtifact(parseStoredJson(source.records, []), sourceArtifact),
+    [],
+  );
 
   const versionId = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -313,7 +334,7 @@ async function rollbackVersion(
         versionId,
         instruction,
         source.spec,
-        source.records,
+        sourceRecords,
         source.prompt,
         source.provider,
         source.model,
@@ -330,7 +351,7 @@ async function rollbackVersion(
             updated_at = ?
         WHERE id = ? AND workspace_id = ?
       `)
-      .bind(source.spec, source.records, now, projectId, workspace.id),
+      .bind(source.spec, sourceRecords, now, projectId, workspace.id),
     db
       .prepare(`
         SELECT ${PROJECT_COLUMNS}

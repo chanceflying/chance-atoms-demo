@@ -49,6 +49,42 @@ test("exports a runnable, dependency-free standalone project", () => {
   assert.match(archiveText, /README\.md/);
 });
 
+test("exports a Web App Artifact without rewriting the generated HTML", () => {
+  const html = `<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="utf-8"><title>贪吃蛇</title></head>
+  <body><canvas id="game"></canvas><script>document.title = "贪吃蛇";</script></body>
+</html>`;
+  const artifact = {
+    schemaVersion: 1 as const,
+    kind: "web_app" as const,
+    title: "贪吃蛇",
+    description: "一个可以直接运行的键盘控制小游戏。",
+    html,
+    acceptanceCriteria: ["方向键可以控制移动", "碰撞后可以重新开始"],
+  };
+
+  const result = createStandaloneProject({
+    artifact,
+    records: [{ id: "ignored", values: [] }],
+    projectId: "snake-demo",
+  });
+
+  assert.deepEqual(
+    result.files.map((file) => file.name),
+    ["index.html", "artifact.json", "README.md"],
+  );
+  assert.equal(result.files[0].content, html);
+  assert.match(result.files[1].content, /"kind": "web_app"/);
+  assert.match(result.files[1].content, /"acceptanceCriteria"/);
+  assert.match(result.files[2].content, /独立 Web App/);
+  assert.match(result.files[2].content, /artifact\.json/);
+  const archiveText = new TextDecoder().decode(result.archive);
+  assert.match(archiveText, /index\.html/);
+  assert.match(archiveText, /artifact\.json/);
+  assert.match(archiveText, /README\.md/);
+});
+
 test("keeps hostile generated text inert inside the exported HTML", () => {
   const spec = deterministicAgent("Build a generic tracker");
   const hostile = "</script><img src=x onerror=alert('owned')>";
@@ -69,6 +105,37 @@ test("keeps hostile generated text inert inside the exported HTML", () => {
 
   assert.doesNotMatch(html, /<img src=x onerror=/);
   assert.match(html, /\\u003c\/script\\u003e\\u003cimg/);
+});
+
+test("exports a generated web app without rebuilding its HTML", async () => {
+  const artifact = {
+    schemaVersion: 1 as const,
+    kind: "web_app" as const,
+    title: "Snake Game",
+    description: "A playable single-file snake game",
+    html: "<!doctype html><html><body><canvas id=game></canvas><script>document.title='Snake Game'</script></body></html>",
+    acceptanceCriteria: ["Arrow keys move the snake", "Restart starts a new game"],
+  };
+  const result = createStandaloneProject({ artifact, projectId: "snake-demo" });
+
+  assert.equal(result.fileName, "snake-game-standalone.zip");
+  assert.deepEqual(
+    result.files.map((file) => file.name),
+    ["index.html", "artifact.json", "README.md"],
+  );
+  assert.equal(result.files[0].content, artifact.html);
+  assert.match(result.files[1].content, /"kind": "web_app"/);
+  assert.match(result.files[2].content, /独立 Web App/);
+
+  const response = await POST(
+    new Request("http://localhost/api/export", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ artifact, projectId: "snake-demo" }),
+    }),
+  );
+  assert.equal(response.status, 200);
+  assert.match(new TextDecoder().decode(await response.arrayBuffer()), /artifact\.json/);
 });
 
 test("rejects invalid specs, records, project ids, and archive paths", () => {

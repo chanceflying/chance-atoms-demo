@@ -7,6 +7,7 @@ import {
   jsonText,
   optionalString,
   readJsonObject,
+  RequestError,
   workspaceForRequest,
   type Workspace,
 } from "../../../db/http";
@@ -14,6 +15,12 @@ import {
   serializeProject,
   type DatabaseRow,
 } from "../../../db/serializers";
+import {
+  isWebAppArtifact,
+  parseRecordsForArtifact,
+  parseStoredArtifact,
+  type StoredArtifact,
+} from "@/lib";
 
 export async function GET(request: Request) {
   let workspace: Workspace = workspaceForRequest(request);
@@ -51,9 +58,19 @@ export async function POST(request: Request) {
       optionalString(payload, "title", 200) ??
       optionalString(payload, "name", 200);
     const title = requestedTitle || titleFromPrompt(prompt);
-    const rawSpec = payload.spec === undefined ? payload.currentSpec : payload.spec;
-    const spec = jsonText(rawSpec, {});
-    const records = jsonText(payload.records, []);
+    const rawArtifact = Object.hasOwn(payload, "artifact")
+      ? payload.artifact
+      : payload.spec === undefined
+        ? payload.currentSpec
+        : payload.spec;
+    const artifact = rawArtifact === undefined ? null : validArtifact(rawArtifact);
+    const spec = jsonText(artifact ?? undefined, {});
+    const recordInput = artifact && !isWebAppArtifact(artifact)
+      ? (payload.records ?? artifact.seedData)
+      : payload.records;
+    const records = artifact
+      ? jsonText(validRecordsForArtifact(recordInput ?? [], artifact), [])
+      : jsonText(payload.records, []);
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
     const db = await ensureDatabase();
@@ -86,4 +103,20 @@ function titleFromPrompt(prompt: string) {
   const normalized = prompt.replace(/\s+/g, " ").trim();
   if (!normalized) return "Untitled project";
   return normalized.length > 64 ? `${normalized.slice(0, 61)}...` : normalized;
+}
+
+function validArtifact(value: unknown): StoredArtifact {
+  try {
+    return parseStoredArtifact(value);
+  } catch {
+    throw new RequestError(400, "spec must be a valid stored artifact");
+  }
+}
+
+function validRecordsForArtifact(value: unknown, artifact: StoredArtifact) {
+  try {
+    return parseRecordsForArtifact(value, artifact);
+  } catch {
+    throw new RequestError(400, "records must match the current artifact");
+  }
 }

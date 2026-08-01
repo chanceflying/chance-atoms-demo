@@ -546,6 +546,91 @@ select:focus-visible {
   color: #a2a49e;
 }
 
+.artifact-mode {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 20px 14px;
+  color: #74766f;
+  font-size: 10px;
+}
+
+.artifact-mode > span {
+  font-family: var(--mono);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.artifact-mode__options {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid #d7d4ce;
+  border-radius: 9px;
+  background: #f4f2ed;
+}
+
+.artifact-mode__options button {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #72746d;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.artifact-mode__options button.is-active {
+  background: var(--ink);
+  color: #fff;
+  box-shadow: 0 2px 7px rgba(23, 24, 22, 0.16);
+}
+
+.artifact-mode__options button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.artifact-mode__provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  color: #858780;
+  font-size: 9px;
+}
+
+.artifact-mode__provider i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #a6a8a1;
+}
+
+.artifact-mode__provider--checking i {
+  background: #d49c22;
+  animation: pulse 0.9s infinite;
+}
+
+.artifact-mode__provider--available {
+  color: #438437;
+}
+
+.artifact-mode__provider--available i {
+  background: #5aab48;
+}
+
+.artifact-mode__provider--unavailable {
+  color: #b24848;
+}
+
+.artifact-mode__provider--unavailable i {
+  background: #d65252;
+}
+
 .prompt-composer__footer {
   min-height: 68px;
   display: flex;
@@ -1604,9 +1689,33 @@ select:focus-visible {
 
 .build-summary__topline {
   display: grid;
-  grid-template-columns: 30px 1fr auto;
+  grid-template-columns: 30px 1fr auto auto;
   gap: 10px;
   padding: 16px;
+}
+
+.provider-pill {
+  align-self: start;
+  padding: 4px 8px;
+  border: 1px solid #d8d5ce;
+  border-radius: 99px;
+  background: #f5f3ee;
+  color: #64665f;
+  font-family: var(--mono);
+  font-size: 7px;
+  white-space: nowrap;
+}
+
+.provider-pill--openai {
+  border-color: #b9dccd;
+  background: #eef9f4;
+  color: #287254;
+}
+
+.provider-pill--codex_session {
+  border-color: #c9c4ed;
+  background: #f1efff;
+  color: #574fa0;
 }
 
 .summary-icon {
@@ -2228,6 +2337,17 @@ select:focus-visible {
     align-items: stretch;
     flex-direction: column;
     padding: 12px;
+  }
+
+  .artifact-mode {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    padding-inline: 12px;
+  }
+
+  .artifact-mode__provider {
+    width: 100%;
+    margin-left: 0;
   }
 
   .prompt-composer__hint {
