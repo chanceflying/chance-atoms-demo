@@ -1,4 +1,4 @@
-const WORKSPACE_COOKIE = "atoms_workspace";
+export const WORKSPACE_COOKIE = "atoms_workspace";
 const WORKSPACE_MAX_AGE = 60 * 60 * 24 * 365;
 const MAX_JSON_BODY_BYTES = 1_000_000;
 const UUID_PATTERN =
@@ -7,6 +7,7 @@ const UUID_PATTERN =
 export type Workspace = {
   id: string;
   setCookie?: string;
+  additionalSetCookies?: string[];
 };
 
 export function workspaceForRequest(request: Request): Workspace {
@@ -17,11 +18,15 @@ export function workspaceForRequest(request: Request): Workspace {
   }
 
   const id = crypto.randomUUID();
-  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
   return {
     id,
-    setCookie: `${WORKSPACE_COOKIE}=${id}; Path=/; Max-Age=${WORKSPACE_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`,
+    setCookie: workspaceCookie(request, id),
   };
+}
+
+export function workspaceCookie(request: Request, id: string) {
+  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  return `${WORKSPACE_COOKIE}=${encodeURIComponent(id)}; Path=/; Max-Age=${WORKSPACE_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`;
 }
 
 export function jsonResponse(
@@ -30,11 +35,25 @@ export function jsonResponse(
   init: ResponseInit = {},
 ) {
   const headers = new Headers(init.headers);
-  if (workspace.setCookie) headers.set("Set-Cookie", workspace.setCookie);
+  if (!headers.has("Cache-Control")) {
+    headers.set("Cache-Control", "private, no-store");
+  }
+  if (workspace.setCookie) headers.append("Set-Cookie", workspace.setCookie);
+  for (const cookie of workspace.additionalSetCookies ?? []) {
+    headers.append("Set-Cookie", cookie);
+  }
   return Response.json(body, { ...init, headers });
 }
 
 export async function readJsonObject(request: Request) {
+  const contentType = (request.headers.get("content-type") ?? "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  if (contentType !== "application/json" && !contentType.endsWith("+json")) {
+    throw new RequestError(415, "Content-Type must be application/json");
+  }
+
   let value: unknown;
   try {
     const declaredLength = Number(request.headers.get("content-length") ?? 0);
@@ -55,6 +74,22 @@ export async function readJsonObject(request: Request) {
     throw new RequestError(400, "Request body must be a JSON object");
   }
   return value as Record<string, unknown>;
+}
+
+export function assertSameOriginMutation(request: Request) {
+  const fetchSite = request.headers.get("sec-fetch-site")?.toLowerCase();
+  if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") {
+    throw new RequestError(403, "Cross-origin mutation is not allowed");
+  }
+
+  const origin = request.headers.get("origin");
+  if (!origin) return;
+  try {
+    if (new URL(origin).origin === new URL(request.url).origin) return;
+  } catch {
+    // Invalid origins are rejected below.
+  }
+  throw new RequestError(403, "Cross-origin mutation is not allowed");
 }
 
 export function optionalString(
@@ -125,11 +160,11 @@ export function errorResponse(workspace: Workspace, error: unknown) {
   return jsonResponse(
     workspace,
     { error: "Unable to complete the database request" },
-    { status: 500 },
+    { status: 500, headers: { "Cache-Control": "no-store" } },
   );
 }
 
-function readCookie(header: string, name: string) {
+export function readCookie(header: string, name: string) {
   for (const part of header.split(";")) {
     const separator = part.indexOf("=");
     if (separator === -1) continue;

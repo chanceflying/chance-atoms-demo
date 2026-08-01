@@ -1,11 +1,14 @@
 import { ensureDatabase } from "../../../db";
+import { resolveIdentity } from "../../../db/auth";
 import {
+  assertSameOriginMutation,
   errorResponse,
   jsonResponse,
   jsonText,
   optionalString,
   readJsonObject,
   workspaceForRequest,
+  type Workspace,
 } from "../../../db/http";
 import {
   serializeProject,
@@ -13,8 +16,9 @@ import {
 } from "../../../db/serializers";
 
 export async function GET(request: Request) {
-  const workspace = workspaceForRequest(request);
+  let workspace: Workspace = workspaceForRequest(request);
   try {
+    workspace = await resolveIdentity(request);
     const db = await ensureDatabase();
     const result = await db
       .prepare(`
@@ -37,8 +41,10 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const workspace = workspaceForRequest(request);
+  let workspace: Workspace = workspaceForRequest(request);
   try {
+    assertSameOriginMutation(request);
+    workspace = await resolveIdentity(request);
     const payload = await readJsonObject(request);
     const prompt = optionalString(payload, "prompt", 20_000) ?? "";
     const requestedTitle =

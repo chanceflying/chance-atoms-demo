@@ -19,6 +19,32 @@ Configure these environment secrets:
 Never add secret values to `wrangler.jsonc`, `.env.example`, workflow YAML, an
 issue, or a pull request. Local `.env*` files are ignored by Git.
 
+## GitHub sign-in
+
+Register a GitHub OAuth App with these production URLs:
+
+```text
+Homepage URL:
+https://chance-atoms-demo.chanceflying1.workers.dev
+
+Authorization callback URL:
+https://chance-atoms-demo.chanceflying1.workers.dev/api/auth/github/callback
+```
+
+The application requests no OAuth scopes and uses only the public GitHub
+identity returned by `/user`. Store both runtime values directly as Cloudflare
+Worker secrets:
+
+```bash
+npx wrangler secret put GITHUB_CLIENT_ID
+npx wrangler secret put GITHUB_CLIENT_SECRET
+```
+
+These secrets are intentionally not synchronized by the deploy workflow.
+Wrangler deployments preserve Worker secrets that are already configured. When
+the values are absent, anonymous workspaces continue to work and the sign-in
+route returns a controlled configuration error.
+
 ## Before the first deployment
 
 Create and migrate D1 before the Worker can receive traffic:
@@ -40,14 +66,16 @@ use the manual workflow for later deployments.
 
 The workflow builds the complete Worker before applying migrations, then uploads
 that exact build. Disable the migration input only when migrations were applied
-separately. OpenAI secret sync is opt-in. Leaving the GitHub secret empty does
-not remove a secret that already exists on Cloudflare; delete or rotate that
-secret explicitly in Cloudflare when needed.
+separately. OpenAI secret sync is opt-in. Leaving the GitHub Actions
+`OPENAI_API_KEY` secret empty does not remove a secret that already exists on
+Cloudflare; delete or rotate that secret explicitly in Cloudflare when needed.
 
 ## Rotation and recovery
 
 - Rotate a leaked token immediately in the provider dashboard, then update the
   matching GitHub environment secret.
+- Rotate a leaked GitHub OAuth client secret in GitHub, then replace
+  `GITHUB_CLIENT_SECRET` in the Cloudflare Worker secret store.
 - Cloudflare deployment history can roll back application code. Database
   migrations must be designed to remain backward compatible; do not assume a
   Worker rollback also rolls back D1 data.

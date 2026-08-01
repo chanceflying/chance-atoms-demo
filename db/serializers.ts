@@ -6,7 +6,6 @@ export function serializeProject(row: DatabaseRow) {
   const spec = parseStoredJson(row.current_spec, {});
   return {
     id: row.id,
-    workspaceId: row.workspace_id,
     title: row.title,
     name: row.title,
     prompt: row.prompt,

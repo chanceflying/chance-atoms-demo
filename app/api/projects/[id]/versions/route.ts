@@ -1,5 +1,7 @@
 import { ensureDatabase } from "../../../../../db";
+import { resolveIdentity } from "../../../../../db/auth";
 import {
+  assertSameOriginMutation,
   errorResponse,
   jsonResponse,
   jsonText,
@@ -8,6 +10,7 @@ import {
   readJsonObject,
   RequestError,
   workspaceForRequest,
+  type Workspace,
 } from "../../../../../db/http";
 import {
   serializeProject,
@@ -25,8 +28,9 @@ const PROJECT_COLUMNS = `
 `;
 
 export async function GET(request: Request, { params }: RouteContext) {
-  const workspace = workspaceForRequest(request);
+  let workspace: Workspace = workspaceForRequest(request);
   try {
+    workspace = await resolveIdentity(request);
     const { id } = await params;
     const db = await ensureDatabase();
     const result = await db
@@ -52,8 +56,10 @@ export async function GET(request: Request, { params }: RouteContext) {
 }
 
 export async function POST(request: Request, { params }: RouteContext) {
-  const workspace = workspaceForRequest(request);
+  let workspace: Workspace = workspaceForRequest(request);
   try {
+    assertSameOriginMutation(request);
+    workspace = await resolveIdentity(request);
     const { id } = await params;
     const payload = await readJsonObject(request);
     if (payload.action !== undefined && payload.action !== "rollback") {
@@ -167,8 +173,10 @@ export async function POST(request: Request, { params }: RouteContext) {
 }
 
 export async function PATCH(request: Request, { params }: RouteContext) {
-  const workspace = workspaceForRequest(request);
+  let workspace: Workspace = workspaceForRequest(request);
   try {
+    assertSameOriginMutation(request);
+    workspace = await resolveIdentity(request);
     const { id } = await params;
     const payload = await readJsonObject(request);
     if (!Object.hasOwn(payload, "records")) {
@@ -257,7 +265,7 @@ function validRecords(value: unknown, spec: AppSpec) {
 }
 
 async function rollbackVersion(
-  workspace: ReturnType<typeof workspaceForRequest>,
+  workspace: Workspace,
   projectId: string,
   payload: Record<string, unknown>,
 ) {

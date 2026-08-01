@@ -53,6 +53,12 @@ type PendingBuild = {
   projectId?: string;
 };
 
+type PendingPersistence = {
+  records: AppRecord[];
+  projectId: string;
+  versionId: string;
+};
+
 type PlanStep = {
   title: string;
   detail: string;
@@ -71,6 +77,18 @@ type GenerateResponse = {
   model: string | null;
   warning: string | null;
   stages: string[];
+};
+
+type SessionUser = {
+  id: string;
+  login: string;
+  name: string | null;
+  avatarUrl: string | null;
+};
+
+type Notice = {
+  text: string;
+  tone: "success" | "error";
 };
 
 const STARTERS = [
@@ -182,6 +200,19 @@ function normalizeProject(value: unknown): ProjectItem | null {
     currentVersion: readNumber(row.currentVersion ?? row.current_version, 0),
     createdAt: readNullableString(row.createdAt ?? row.created_at),
     updatedAt: readNullableString(row.updatedAt ?? row.updated_at),
+  };
+}
+
+function normalizeSessionUser(payload: unknown): SessionUser | null {
+  if (!isRecord(payload) || !isRecord(payload.user)) return null;
+  const id = readString(payload.user.id).trim();
+  const login = readString(payload.user.login).trim();
+  if (!id || !login) return null;
+  return {
+    id,
+    login,
+    name: readNullableString(payload.user.name),
+    avatarUrl: readNullableString(payload.user.avatarUrl),
   };
 }
 
@@ -367,12 +398,24 @@ export default function Studio() {
   const [exportLoading, setExportLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [retryAction, setRetryAction] = useState<RetryAction>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [user, setUser] = useState<SessionUser | null>(null);
+  const [sessionLoading, setSessionLoading] = useState(true);
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [logoutLoading, setLogoutLoading] = useState(false);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const persistQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingPersistenceRef = useRef<PendingPersistence | null>(null);
+  const persistFailedRef = useRef(false);
+  const accountSwitchingRef = useRef(false);
+  const mutationInFlightRef = useRef(false);
+  const identityEpochRef = useRef(0);
+  const openProjectRequestRef = useRef(0);
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const accountSwitching = loginLoading || logoutLoading;
 
   const activeVersion = useMemo(
     () => versions.find((version) => version.id === activeVersionId) ?? versions[0] ?? null,
@@ -389,34 +432,89 @@ export default function Studio() {
     [activeProject?.id, activeVersion?.spec, records],
   );
 
-  const showNotice = useCallback((text: string) => {
+  const showNotice = useCallback((text: string, tone: Notice["tone"] = "success") => {
     if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
-    setNotice(text);
+    setNotice({ text, tone });
     noticeTimerRef.current = setTimeout(() => setNotice(null), 3600);
   }, []);
 
+  const loadSession = useCallback(async () => {
+    const identityEpoch = identityEpochRef.current;
+    setSessionLoading(true);
+    try {
+      const payload = await requestJson("/api/auth/session", { cache: "no-store" });
+      if (identityEpoch !== identityEpochRef.current) return;
+      setUser(normalizeSessionUser(payload));
+    } catch {
+      if (identityEpoch !== identityEpochRef.current) return;
+      setUser(null);
+      showNotice("暂时无法确认登录状态，已继续使用访客工作区", "error");
+    } finally {
+      if (identityEpoch === identityEpochRef.current) {
+        setSessionLoading(false);
+      }
+    }
+  }, [showNotice]);
+
   const loadProjects = useCallback(async (silent = false) => {
+    const identityEpoch = identityEpochRef.current;
     if (!silent) setProjectsLoading(true);
     setErrorMessage(null);
     try {
       const payload = await requestJson("/api/projects", { cache: "no-store" });
+      if (identityEpoch !== identityEpochRef.current) return;
       const nextProjects = unwrapArray(payload, ["projects", "items", "data"])
         .map(normalizeProject)
         .filter((item): item is ProjectItem => Boolean(item));
       setProjects(nextProjects);
       setRetryAction(null);
     } catch (error) {
+      if (identityEpoch !== identityEpochRef.current) return;
       setErrorMessage(getErrorMessage(error, "暂时无法读取最近项目。"));
       setRetryAction("projects");
     } finally {
-      if (!silent) setProjectsLoading(false);
+      if (!silent && identityEpoch === identityEpochRef.current) {
+        setProjectsLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
-    const timer = setTimeout(() => void loadProjects(), 0);
+    const timer = setTimeout(() => {
+      void loadSession();
+      void loadProjects();
+    }, 0);
     return () => clearTimeout(timer);
-  }, [loadProjects]);
+  }, [loadProjects, loadSession]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const authResult = params.get("auth");
+    if (!authResult) return;
+
+    const claimed = Math.max(0, Number.parseInt(params.get("claimed") ?? "0", 10) || 0);
+    const noticeTimer = window.setTimeout(() => {
+      if (authResult === "success") {
+        showNotice(
+          claimed > 0
+            ? `登录成功，已将 ${claimed} 个访客项目同步到账号`
+            : "GitHub 登录成功，项目已同步至账号",
+        );
+      } else {
+        showNotice("GitHub 登录未完成，请重试", "error");
+      }
+    }, 0);
+
+    params.delete("auth");
+    params.delete("claimed");
+    const search = params.toString();
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`,
+    );
+    return () => window.clearTimeout(noticeTimer);
+  }, [showNotice]);
 
   useEffect(() => {
     return () => {
@@ -434,6 +532,9 @@ export default function Studio() {
   }, [phase]);
 
   const openProject = useCallback(async (project: ProjectItem) => {
+    const identityEpoch = identityEpochRef.current;
+    const requestId = openProjectRequestRef.current + 1;
+    openProjectRequestRef.current = requestId;
     setActiveProject(project);
     setVersions([]);
     setActiveVersionId(null);
@@ -453,6 +554,10 @@ export default function Studio() {
         `/api/projects/${encodeURIComponent(project.id)}/versions`,
         { cache: "no-store" },
       );
+      if (
+        identityEpoch !== identityEpochRef.current
+        || requestId !== openProjectRequestRef.current
+      ) return;
       const normalized = unwrapArray(payload, ["versions", "items", "data"])
         .map((item, index) => normalizeVersion(item, project.id, index + 1))
         .filter((item): item is VersionItem => Boolean(item));
@@ -466,15 +571,26 @@ export default function Studio() {
       }
       setRetryAction(null);
     } catch (error) {
+      if (
+        identityEpoch !== identityEpochRef.current
+        || requestId !== openProjectRequestRef.current
+      ) return;
       setErrorMessage(getErrorMessage(error, "暂时无法读取项目版本。"));
       setRetryAction("versions");
     } finally {
-      setVersionsLoading(false);
+      if (
+        identityEpoch === identityEpochRef.current
+        && requestId === openProjectRequestRef.current
+      ) {
+        setVersionsLoading(false);
+      }
     }
   }, []);
 
   const resetToHome = useCallback(() => {
+    openProjectRequestRef.current += 1;
     setPhase("home");
+    setVersionsLoading(false);
     setActiveProject(null);
     setVersions([]);
     setActiveVersionId(null);
@@ -489,6 +605,7 @@ export default function Studio() {
   }, []);
 
   const beginNewPlan = useCallback(() => {
+    if (accountSwitchingRef.current) return;
     const cleanPrompt = prompt.trim();
     if (cleanPrompt.length < 4) {
       setErrorMessage("再多描述一点吧，例如要管理什么、需要哪些信息。 ");
@@ -513,6 +630,7 @@ export default function Studio() {
   }, [prompt]);
 
   const beginRefinePlan = useCallback(() => {
+    if (accountSwitchingRef.current) return;
     const cleanInstruction = instruction.trim();
     if (!activeProject || !activeVersion) return;
     if (cleanInstruction.length < 2) {
@@ -599,6 +717,12 @@ export default function Studio() {
 
   const executeBuild = useCallback(async () => {
     if (!pendingBuild) return;
+    if (accountSwitchingRef.current) {
+      showNotice("账号切换完成后再开始构建", "error");
+      return;
+    }
+    if (mutationInFlightRef.current) return;
+    mutationInFlightRef.current = true;
     const build = pendingBuild;
     setBuildingStage(0);
     setPhase("building");
@@ -682,6 +806,8 @@ export default function Studio() {
       setErrorMessage(getErrorMessage(error, "生成过程中出现问题，请重试。"));
       setRetryAction("build");
       setPhase("planning");
+    } finally {
+      mutationInFlightRef.current = false;
     }
   }, [
     activeProject,
@@ -706,6 +832,12 @@ export default function Studio() {
 
   const rollbackVersion = useCallback(async () => {
     if (!activeProject || !activeVersion || !isHistoricalVersion) return;
+    if (accountSwitchingRef.current) {
+      showNotice("账号切换完成后再恢复版本", "error");
+      return;
+    }
+    if (mutationInFlightRef.current) return;
+    mutationInFlightRef.current = true;
     setRollbackLoading(true);
     setErrorMessage(null);
     setRetryAction(null);
@@ -761,6 +893,7 @@ export default function Studio() {
       setErrorMessage(getErrorMessage(error, "暂时无法恢复这个版本。"));
       setRetryAction("rollback");
     } finally {
+      mutationInFlightRef.current = false;
       setRollbackLoading(false);
     }
   }, [
@@ -776,6 +909,7 @@ export default function Studio() {
   const patchRecords = useCallback(
     async (nextRecords: AppRecord[], projectId: string, versionId: string) => {
       setPersistStatus("saving");
+      persistFailedRef.current = false;
       try {
         const payload = await requestJson(
           `/api/projects/${encodeURIComponent(projectId)}/versions`,
@@ -802,6 +936,7 @@ export default function Studio() {
         }
         setPersistStatus("saved");
       } catch (error) {
+        persistFailedRef.current = true;
         setPersistStatus("error");
         setErrorMessage(getErrorMessage(error, "数据未能保存，请稍后再试。"));
         setRetryAction(null);
@@ -809,6 +944,83 @@ export default function Studio() {
     },
     [],
   );
+
+  const enqueuePendingPersistence = useCallback(() => {
+    const pending = pendingPersistenceRef.current;
+    if (!pending) return persistQueueRef.current;
+
+    pendingPersistenceRef.current = null;
+    persistQueueRef.current = persistQueueRef.current.then(() =>
+      patchRecords(pending.records, pending.projectId, pending.versionId),
+    );
+    return persistQueueRef.current;
+  }, [patchRecords]);
+
+  const flushPendingPersistence = useCallback(async () => {
+    if (persistTimerRef.current) {
+      window.clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
+    await enqueuePendingPersistence();
+    if (persistFailedRef.current) {
+      throw new Error("数据尚未保存成功，请先重试后再切换账号。");
+    }
+  }, [enqueuePendingPersistence]);
+
+  const beginLogin = useCallback(async () => {
+    if (accountSwitchingRef.current) return;
+    if (phase === "building" || mutationInFlightRef.current) {
+      showNotice("请等待当前写入完成后再登录", "error");
+      return;
+    }
+
+    accountSwitchingRef.current = true;
+    identityEpochRef.current += 1;
+    openProjectRequestRef.current += 1;
+    setLoginLoading(true);
+    setErrorMessage(null);
+    try {
+      await flushPendingPersistence();
+      window.location.assign("/api/auth/github");
+    } catch (error) {
+      accountSwitchingRef.current = false;
+      setErrorMessage(getErrorMessage(error, "登录前保存失败，请稍后重试。"));
+      setLoginLoading(false);
+      setVersionsLoading(false);
+      void loadProjects();
+    }
+  }, [flushPendingPersistence, loadProjects, phase, showNotice]);
+
+  const handleLogout = useCallback(async () => {
+    if (accountSwitchingRef.current) return;
+    if (phase === "building" || mutationInFlightRef.current) {
+      showNotice("请等待当前写入完成后再退出", "error");
+      return;
+    }
+
+    accountSwitchingRef.current = true;
+    identityEpochRef.current += 1;
+    openProjectRequestRef.current += 1;
+    setLogoutLoading(true);
+    setErrorMessage(null);
+    try {
+      await flushPendingPersistence();
+      await requestJson("/api/auth/logout", { method: "POST" });
+      setUser(null);
+      resetToHome();
+      setProjects([]);
+      setProjectsLoading(true);
+      await loadProjects();
+      showNotice("已退出，已切换回访客工作区");
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error, "退出失败，请稍后再试。"));
+      setVersionsLoading(false);
+      void loadProjects();
+    } finally {
+      accountSwitchingRef.current = false;
+      setLogoutLoading(false);
+    }
+  }, [flushPendingPersistence, loadProjects, phase, resetToHome, showNotice]);
 
   const exportProject = useCallback(async () => {
     if (!activeProject || !activeVersion) return;
@@ -863,6 +1075,7 @@ export default function Studio() {
       if (event.source !== iframeRef.current?.contentWindow || !isRecord(event.data)) return;
       if (event.data.source !== "forge-preview" || event.data.type !== "records-change") return;
       if (!activeProject || !activeVersion) return;
+      if (accountSwitchingRef.current) return;
       if (isHistoricalVersion) {
         showNotice("历史版本为只读，请先恢复为新版本再编辑");
         return;
@@ -870,16 +1083,20 @@ export default function Studio() {
       const payload = isRecord(event.data.payload) ? event.data.payload : event.data;
       const nextRecords = parseRecords(payload.records);
       setRecords(nextRecords);
+      pendingPersistenceRef.current = {
+        records: nextRecords,
+        projectId: activeProject.id,
+        versionId: activeVersion.id,
+      };
       if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
       persistTimerRef.current = setTimeout(() => {
-        persistQueueRef.current = persistQueueRef.current.then(() =>
-          patchRecords(nextRecords, activeProject.id, activeVersion.id),
-        );
+        persistTimerRef.current = null;
+        void enqueuePendingPersistence();
       }, 320);
     };
     window.addEventListener("message", handlePreviewMessage);
     return () => window.removeEventListener("message", handlePreviewMessage);
-  }, [activeProject, activeVersion, isHistoricalVersion, patchRecords, showNotice]);
+  }, [activeProject, activeVersion, enqueuePendingPersistence, isHistoricalVersion, showNotice]);
 
   const handleRetry = useCallback(() => {
     if (retryAction === "projects") void loadProjects();
@@ -934,9 +1151,19 @@ export default function Studio() {
             <span className="forge-brand__word">Forge</span>
             <span className="forge-brand__badge">AI Builder</span>
           </a>
-          <div className="forge-home__status">
-            <span className="status-dot status-dot--live" aria-hidden="true" />
-            Builder online
+          <div className="forge-home__header-actions">
+            <div className="forge-home__status">
+              <span className="status-dot status-dot--live" aria-hidden="true" />
+              Builder online
+            </div>
+            <AccountControl
+              user={user}
+              loading={sessionLoading}
+              loginLoading={loginLoading}
+              logoutLoading={logoutLoading}
+              onLogin={() => void beginLogin()}
+              onLogout={() => void handleLogout()}
+            />
           </div>
         </header>
 
@@ -966,12 +1193,17 @@ export default function Studio() {
               rows={4}
               maxLength={1200}
               autoFocus
+              disabled={accountSwitching}
             />
             <div className="prompt-composer__footer">
               <span className="prompt-composer__hint">
                 <kbd>⌘</kbd><kbd>↵</kbd> 提交 · 可继续补充字段和筛选方式
               </span>
-              <button className="forge-button forge-button--primary" type="submit">
+              <button
+                className="forge-button forge-button--primary"
+                type="submit"
+                disabled={accountSwitching}
+              >
                 <span>生成计划</span>
                 <span aria-hidden="true">→</span>
               </button>
@@ -1029,6 +1261,31 @@ export default function Studio() {
               <span>{projects.length} 个已保存项目</span>
             ) : null}
           </div>
+          <div
+            className={`workspace-sync-note${user ? " workspace-sync-note--account" : ""}`}
+            role="status"
+            aria-live="polite"
+          >
+            <span className="workspace-sync-note__icon" aria-hidden="true">
+              {sessionLoading ? "···" : user ? "✓" : "◇"}
+            </span>
+            <div>
+              <strong>
+                {sessionLoading
+                  ? "正在确认保存方式"
+                  : user
+                    ? `已同步至 ${user.login} 的账号`
+                    : "访客工作区"}
+              </strong>
+              <p>
+                {sessionLoading
+                  ? "你的项目列表会在工作区准备好后显示。"
+                  : user
+                    ? "项目已绑定 GitHub 账号，可在其他设备登录后继续使用。"
+                    : "项目已保存到当前浏览器，登录后可跨设备访问。"}
+              </p>
+            </div>
+          </div>
           {projectsLoading ? (
             <div
               className="recent-grid"
@@ -1082,6 +1339,7 @@ export default function Studio() {
           <span>FORGE / AI APPLICATION BUILDER</span>
           <span>Plan · Build · Run · Refine</span>
         </footer>
+        <NoticeToast notice={notice} />
       </main>
     );
   }
@@ -1091,7 +1349,12 @@ export default function Studio() {
   return (
     <main className="studio-shell">
       <header className="studio-topbar">
-        <button className="forge-brand forge-brand--button" type="button" onClick={resetToHome}>
+        <button
+          className="forge-brand forge-brand--button"
+          type="button"
+          onClick={resetToHome}
+          disabled={accountSwitching}
+        >
           <span className="forge-brand__mark" aria-hidden="true">
             <span />
             <span />
@@ -1115,9 +1378,28 @@ export default function Studio() {
               ? "正在保存"
               : persistStatus === "error"
                 ? "保存失败"
-                : "云端已同步"}
+                : sessionLoading
+                  ? "正在确认工作区"
+                  : user
+                    ? "云端已同步"
+                    : "已保存到访客工作区"}
           </span>
-          <button className="icon-button" type="button" onClick={resetToHome} aria-label="新建应用">
+          <AccountControl
+            user={user}
+            loading={sessionLoading}
+            loginLoading={loginLoading}
+            logoutLoading={logoutLoading}
+            onLogin={() => void beginLogin()}
+            onLogout={() => void handleLogout()}
+            compact
+          />
+          <button
+            className="icon-button"
+            type="button"
+            onClick={resetToHome}
+            aria-label="新建应用"
+            disabled={accountSwitching}
+          >
             <span aria-hidden="true">＋</span>
           </button>
         </div>
@@ -1128,7 +1410,12 @@ export default function Studio() {
           <div className="sidebar-section">
             <div className="sidebar-section__heading">
               <span>项目</span>
-              <button type="button" onClick={resetToHome} aria-label="创建新项目">＋</button>
+              <button
+                type="button"
+                onClick={resetToHome}
+                aria-label="创建新项目"
+                disabled={accountSwitching}
+              >＋</button>
             </div>
             <div className="sidebar-projects">
               {projects.map((project) => (
@@ -1138,6 +1425,7 @@ export default function Studio() {
                   key={project.id}
                   onClick={() => void openProject(project)}
                   aria-current={project.id === activeProject?.id ? "page" : undefined}
+                  disabled={accountSwitching}
                 >
                   <span className="sidebar-projects__mark" aria-hidden="true">
                     {project.name.slice(0, 1).toUpperCase()}
@@ -1174,6 +1462,7 @@ export default function Studio() {
                     key={version.id}
                     onClick={() => chooseVersion(version)}
                     aria-current={version.id === activeVersion?.id ? "true" : undefined}
+                    disabled={accountSwitching}
                   >
                     <span className="version-list__rail" aria-hidden="true">
                       <i />
@@ -1271,10 +1560,20 @@ export default function Studio() {
                   </p>
                 </div>
                 <div className="build-plan__actions">
-                  <button className="forge-button forge-button--ghost" type="button" onClick={cancelPlan}>
+                  <button
+                    className="forge-button forge-button--ghost"
+                    type="button"
+                    onClick={cancelPlan}
+                    disabled={accountSwitching}
+                  >
                     返回调整
                   </button>
-                  <button className="forge-button forge-button--primary" type="button" onClick={() => void executeBuild()}>
+                  <button
+                    className="forge-button forge-button--primary"
+                    type="button"
+                    onClick={() => void executeBuild()}
+                    disabled={accountSwitching}
+                  >
                     <span aria-hidden="true">✦</span>
                     确认并构建
                   </button>
@@ -1335,7 +1634,7 @@ export default function Studio() {
                       className="forge-button forge-button--secondary"
                       type="button"
                       onClick={() => void rollbackVersion()}
-                      disabled={rollbackLoading}
+                      disabled={rollbackLoading || accountSwitching}
                     >
                       {rollbackLoading ? "正在恢复…" : "恢复此版本"}
                     </button>
@@ -1356,12 +1655,13 @@ export default function Studio() {
                   placeholder="例如：增加优先级字段，把状态筛选放到顶部……"
                   rows={3}
                   maxLength={800}
+                  disabled={accountSwitching}
                 />
                 <button
                   type="submit"
                   className="refine-composer__submit"
                   aria-label="生成调整计划"
-                  disabled={!instruction.trim()}
+                  disabled={!instruction.trim() || accountSwitching}
                 >
                   <span aria-hidden="true">↑</span>
                 </button>
@@ -1435,7 +1735,7 @@ export default function Studio() {
               >
                 {activeVersion && previewHtml ? (
                   <div
-                    className={`preview-device${isHistoricalVersion ? " preview-device--readonly" : ""}`}
+                    className={`preview-device${isHistoricalVersion || accountSwitching ? " preview-device--readonly" : ""}`}
                   >
                     <div className="preview-device__chrome" aria-hidden="true">
                       <span /><span /><span />
@@ -1447,9 +1747,13 @@ export default function Studio() {
                       srcDoc={previewHtml}
                       sandbox="allow-scripts allow-forms allow-modals"
                       referrerPolicy="no-referrer"
-                      tabIndex={isHistoricalVersion ? -1 : 0}
+                      tabIndex={isHistoricalVersion || accountSwitching ? -1 : 0}
                     />
-                    {isHistoricalVersion ? (
+                    {accountSwitching ? (
+                      <div className="preview-readonly" role="status">
+                        正在切换账号 · 暂停编辑
+                      </div>
+                    ) : isHistoricalVersion ? (
                       <div className="preview-readonly" role="status">
                         历史版本只读 · 恢复后可编辑
                       </div>
@@ -1490,13 +1794,109 @@ export default function Studio() {
         </section>
       </div>
 
-      {notice ? (
-        <div className="forge-toast" role="status" aria-live="polite">
-          <span aria-hidden="true">✓</span>
-          {notice}
-        </div>
-      ) : null}
+      <NoticeToast notice={notice} />
     </main>
+  );
+}
+
+function AccountControl({
+  user,
+  loading,
+  loginLoading,
+  logoutLoading,
+  onLogin,
+  onLogout,
+  compact = false,
+}: {
+  user: SessionUser | null;
+  loading: boolean;
+  loginLoading: boolean;
+  logoutLoading: boolean;
+  onLogin: () => void;
+  onLogout: () => void;
+  compact?: boolean;
+}) {
+  const className = `account-control${compact ? " account-control--compact" : ""}`;
+
+  if (loading) {
+    return (
+      <div className={`${className} account-control--loading`} role="status" aria-label="正在检查登录状态">
+        <span className="account-control__skeleton" aria-hidden="true" />
+        <span className="sr-only">正在检查登录状态</span>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <button
+        className={`${className} account-control--login`}
+        type="button"
+        onClick={onLogin}
+        disabled={loginLoading || logoutLoading}
+      >
+        <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+          <path
+            fill="currentColor"
+            d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.24c-3.23.7-3.91-1.37-3.91-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.7.08-.7 1.17.08 1.78 1.2 1.78 1.2 1.04 1.78 2.72 1.27 3.38.97.1-.75.4-1.27.74-1.56-2.58-.3-5.29-1.29-5.29-5.69 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.16 1.18a10.9 10.9 0 0 1 5.76 0c2.19-1.49 3.15-1.18 3.15-1.18.64 1.59.24 2.76.12 3.05.74.8 1.19 1.83 1.19 3.09 0 4.42-2.72 5.39-5.31 5.68.42.36.79 1.07.79 2.16v3.2c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z"
+          />
+        </svg>
+        <span>{loginLoading || logoutLoading ? "切换中…" : "GitHub 登录"}</span>
+      </button>
+    );
+  }
+
+  const displayName = user.name || user.login;
+  const initial = Array.from(displayName.trim())[0]?.toUpperCase() || "U";
+
+  return (
+    <div className={`${className} account-control--signed-in`}>
+      <div className="account-control__identity" aria-label={`已登录为 ${displayName}，GitHub 用户名 ${user.login}`}>
+        <span className="account-control__avatar" aria-hidden="true">
+          {initial}
+          {user.avatarUrl ? (
+            // GitHub avatar domains are dynamic, so a native image keeps OAuth profiles portable.
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={user.avatarUrl}
+              alt=""
+              loading="lazy"
+              referrerPolicy="no-referrer"
+              onError={(event) => {
+                event.currentTarget.hidden = true;
+              }}
+            />
+          ) : null}
+        </span>
+        <span className="account-control__text">
+          <strong>{displayName}</strong>
+          <small>@{user.login}</small>
+        </span>
+      </div>
+      <button
+        className="account-control__logout"
+        type="button"
+        onClick={onLogout}
+        disabled={loginLoading || logoutLoading}
+        aria-label={`退出 ${user.login} 的账号`}
+      >
+        {logoutLoading ? "退出中…" : "退出"}
+      </button>
+    </div>
+  );
+}
+
+function NoticeToast({ notice }: { notice: Notice | null }) {
+  if (!notice) return null;
+  return (
+    <div
+      className={`forge-toast forge-toast--${notice.tone}`}
+      role={notice.tone === "error" ? "alert" : "status"}
+      aria-live={notice.tone === "error" ? "assertive" : "polite"}
+    >
+      <span aria-hidden="true">{notice.tone === "error" ? "!" : "✓"}</span>
+      {notice.text}
+    </div>
   );
 }
 

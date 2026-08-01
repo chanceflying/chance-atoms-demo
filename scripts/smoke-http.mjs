@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-const baseUrl = (process.env.CHANCE_ATOMS_BASE_URL || "http://127.0.0.1:8787").replace(
+const baseUrl = (process.env.CHANCE_ATOMS_BASE_URL || "http://localhost:8787").replace(
   /\/$/,
   "",
 );
@@ -36,6 +36,45 @@ const cookie = (initial.response.headers.get("set-cookie") || "").split(";")[0];
 assert.match(cookie, /^atoms_workspace=/);
 assert.deepEqual(initial.body.projects, []);
 
+const guestSession = await request("/api/auth/session", {}, cookie);
+assert.equal(guestSession.response.status, 200);
+assert.equal(guestSession.body.user, null);
+
+const crossOriginLogout = await request(
+  "/api/auth/logout",
+  { method: "POST", headers: { Origin: "https://attacker.example" } },
+  cookie,
+);
+assert.equal(crossOriginLogout.response.status, 403);
+
+const guestLogout = await request(
+  "/api/auth/logout",
+  { method: "POST", headers: { Origin: new URL(baseUrl).origin } },
+  cookie,
+);
+assert.equal(guestLogout.response.status, 200);
+assert.equal(guestLogout.body.ok, true);
+
+const rejectedContentType = await request(
+  "/api/projects",
+  {
+    ...json("POST", { name: "must not be created" }),
+    headers: { "Content-Type": "text/plain" },
+  },
+  cookie,
+);
+assert.equal(rejectedContentType.response.status, 415);
+
+const crossOriginMutation = await request(
+  "/api/projects",
+  {
+    ...json("POST", { name: "cross-origin project" }),
+    headers: { Origin: "https://attacker.example" },
+  },
+  cookie,
+);
+assert.equal(crossOriginMutation.response.status, 403);
+
 const generated = await request(
   "/api/generate",
   json("POST", {
@@ -53,6 +92,7 @@ const created = await request(
   cookie,
 );
 assert.equal(created.response.status, 201);
+assert.equal(Object.hasOwn(created.body.project, "workspaceId"), false);
 const projectId = created.body.project.id;
 
 const versionOne = await request(
@@ -157,6 +197,8 @@ console.log(
       baseUrl,
       checks: [
         "home",
+        "guest session and logout origin",
+        "mutation origin boundary",
         "workspace isolation",
         "fallback generation",
         "project persistence",

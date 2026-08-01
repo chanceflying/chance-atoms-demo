@@ -1,5 +1,7 @@
 import { ensureDatabase } from "../../../../db";
+import { resolveIdentity } from "../../../../db/auth";
 import {
+  assertSameOriginMutation,
   errorResponse,
   jsonResponse,
   jsonText,
@@ -8,6 +10,7 @@ import {
   readJsonObject,
   RequestError,
   workspaceForRequest,
+  type Workspace,
 } from "../../../../db/http";
 import {
   serializeProject,
@@ -22,8 +25,9 @@ const PROJECT_COLUMNS = `
 `;
 
 export async function GET(request: Request, { params }: RouteContext) {
-  const workspace = workspaceForRequest(request);
+  let workspace: Workspace = workspaceForRequest(request);
   try {
+    workspace = await resolveIdentity(request);
     const { id } = await params;
     const db = await ensureDatabase();
     const project = await db
@@ -45,8 +49,10 @@ export async function GET(request: Request, { params }: RouteContext) {
 }
 
 export async function PATCH(request: Request, { params }: RouteContext) {
-  const workspace = workspaceForRequest(request);
+  let workspace: Workspace = workspaceForRequest(request);
   try {
+    assertSameOriginMutation(request);
+    workspace = await resolveIdentity(request);
     const { id } = await params;
     const payload = await readJsonObject(request);
     const assignments: string[] = [];
@@ -107,8 +113,10 @@ export async function PATCH(request: Request, { params }: RouteContext) {
 }
 
 export async function DELETE(request: Request, { params }: RouteContext) {
-  const workspace = workspaceForRequest(request);
+  let workspace: Workspace = workspaceForRequest(request);
   try {
+    assertSameOriginMutation(request);
+    workspace = await resolveIdentity(request);
     const { id } = await params;
     const db = await ensureDatabase();
     const results = await db.batch<DatabaseRow>([

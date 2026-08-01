@@ -53,3 +53,39 @@ export const versions = sqliteTable(
     ),
   ],
 );
+
+export const users = sqliteTable(
+  "users",
+  {
+    id: text("id").primaryKey(),
+    githubId: text("github_id").notNull(),
+    login: text("login").notNull(),
+    name: text("name"),
+    avatarUrl: text("avatar_url").notNull(),
+    workspaceId: text("workspace_id").notNull(),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("idx_users_github_id").on(table.githubId),
+    uniqueIndex("idx_users_workspace_id").on(table.workspaceId),
+  ],
+);
+
+export const sessions = sqliteTable(
+  "sessions",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    revokedAt: text("revoked_at"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("idx_sessions_token_hash").on(table.tokenHash),
+    index("idx_sessions_user_expires").on(table.userId, table.expiresAt),
+  ],
+);

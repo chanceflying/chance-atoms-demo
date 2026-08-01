@@ -15,6 +15,13 @@
       "when": 1785492060263,
       "tag": "0001_eager_saracen",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785567209754,
+      "tag": "0002_next_purifiers",
+      "breakpoints": true
     }
   ]
 }
