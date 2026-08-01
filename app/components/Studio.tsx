@@ -725,6 +725,7 @@ export default function Studio({
   const [chatMemory, setChatMemory] = useState<ChatMemory>({ enabled: false, content: "" });
   const [memorySaving, setMemorySaving] = useState(false);
   const [memoryPanelOpen, setMemoryPanelOpen] = useState(true);
+  const [versionPanelOpen, setVersionPanelOpen] = useState(true);
   const [agentPanePercent, setAgentPanePercent] = useState(42);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -764,7 +765,13 @@ export default function Studio({
     [projects],
   );
 
-  const recentProjects = useMemo(() => sortedProjects.slice(0, 5), [sortedProjects]);
+  const recentProjects = useMemo(() => {
+    if (!workspaceWriteBusy || !activeProject) return sortedProjects.slice(0, 5);
+    return [
+      activeProject,
+      ...sortedProjects.filter((project) => project.id !== activeProject.id),
+    ].slice(0, 5);
+  }, [activeProject, sortedProjects, workspaceWriteBusy]);
   const filteredProjects = useMemo(
     () => projectFilter === "all"
       ? sortedProjects
@@ -1032,6 +1039,14 @@ export default function Studio({
       }
     }
   }, [showNotice, updatePath]);
+
+  const openOrResumeProject = useCallback((project: ProjectItem) => {
+    if (activeProject?.id === project.id) {
+      resumeWorkspace();
+      return;
+    }
+    void openProject(project);
+  }, [activeProject?.id, openProject, resumeWorkspace]);
 
   useEffect(() => {
     if (
@@ -1700,6 +1715,16 @@ export default function Studio({
     setErrorMessage(null);
 
     try {
+      await requestJson(`/api/projects/${encodeURIComponent(project.id)}/chat`, {
+        method: "POST",
+        body: JSON.stringify({
+          messageId: userMessage.id,
+          role: "user",
+          content: userMessage.content,
+          createdAt: userMessage.createdAt,
+        }),
+      });
+
       const requestBody = {
         message: text,
         history: history
@@ -1730,25 +1755,29 @@ export default function Studio({
         model: result.model,
         createdAt: new Date().toISOString(),
       };
-      if (isCurrentChat()) {
-        setChatMessages((current) => [...current, assistantMessage]);
-      }
-
       await requestJson(`/api/projects/${encodeURIComponent(project.id)}/chat`, {
         method: "POST",
         body: JSON.stringify({
-          userMessage: text,
-          assistantMessage: result.reply,
+          messageId: assistantMessage.id,
+          role: "assistant",
+          content: assistantMessage.content,
           provider: result.provider,
           model: result.model,
+          createdAt: assistantMessage.createdAt,
         }),
       });
+      if (isCurrentChat()) {
+        setChatMessages((current) => [...current, assistantMessage]);
+      }
       void loadProjects(true);
     } catch (error) {
       if (isCurrentChat()) {
-        setChatMessages(history);
-        setChatInput(text);
-        setErrorMessage(getErrorMessage(error, "对话没有完成，请重试。"));
+        setChatMessages((current) => (
+          current.some((message) => message.id === userMessage.id)
+            ? current
+            : [...history, userMessage]
+        ));
+        setErrorMessage(getErrorMessage(error, "Agent 回复没有完成，你的问题已经保留。"));
       }
     } finally {
       if (requestId === chatRequestRef.current) {
@@ -1805,6 +1834,7 @@ export default function Studio({
       setChatMessages([]);
       setChatMemory({ enabled: true, content: "" });
       setPrompt("");
+      setChatLoading(false);
       await sendChatMessage({
         project,
         text: cleanPrompt,
@@ -2030,7 +2060,10 @@ export default function Studio({
 
     const handleMove = (moveEvent: PointerEvent) => {
       const rect = container.getBoundingClientRect();
-      const next = ((moveEvent.clientX - rect.left) / rect.width) * 100;
+      const versionSidebar = container.querySelector<HTMLElement>(".version-sidebar");
+      const adjustableLeft = versionSidebar?.getBoundingClientRect().right ?? rect.left;
+      const adjustableWidth = Math.max(1, rect.right - adjustableLeft);
+      const next = ((moveEvent.clientX - adjustableLeft) / adjustableWidth) * 100;
       setAgentPanePercent(Math.min(62, Math.max(32, next)));
     };
     const handleUp = () => {
@@ -2086,7 +2119,7 @@ export default function Studio({
           workspaceBusy={workspaceWriteBusy}
           onHome={goHome}
           onProjects={goProjects}
-          onOpenProject={(project) => void openProject(project)}
+          onOpenProject={openOrResumeProject}
           onOpenDraft={resumeWorkspace}
           onLogin={() => void beginLogin()}
           onLogout={() => void handleLogout()}
@@ -2110,6 +2143,14 @@ export default function Studio({
             </button>
           </header>
 
+          <div className="atoms-sync-note" role="status" aria-live="polite">
+            <span><UiIcon name={user ? "github" : "folder-heart"} /></span>
+            <div>
+              <strong>{user ? `已同步至 ${user.login} 的 GitHub 账号` : "当前为访客工作区"}</strong>
+              <p>{user ? "登录后可以在其他设备继续使用这些项目。" : "项目会保存在当前浏览器，登录 GitHub 后可跨设备访问。"}</p>
+            </div>
+          </div>
+
           <div className="atoms-project-summary" role="tablist" aria-label="按项目类型筛选">
             {([
               ["all", "全部项目", projects.length, "folder"],
@@ -2131,14 +2172,6 @@ export default function Studio({
             ))}
           </div>
 
-          <div className="atoms-sync-note" role="status" aria-live="polite">
-            <span><UiIcon name={user ? "github" : "folder-heart"} /></span>
-            <div>
-              <strong>{user ? `已同步至 ${user.login} 的 GitHub 账号` : "当前为访客工作区"}</strong>
-              <p>{user ? "登录后可以在其他设备继续使用这些项目。" : "项目会保存在当前浏览器，登录 GitHub 后可跨设备访问。"}</p>
-            </div>
-          </div>
-
           {errorMessage ? <ErrorBanner message={errorMessage} onRetry={retryAction ? handleRetry : undefined} /> : null}
 
           {projectsLoading ? (
@@ -2152,8 +2185,8 @@ export default function Studio({
                   <button
                     className={`atoms-project-card__cover atoms-project-card__cover--${project.kind}`}
                     type="button"
-                    onClick={() => void openProject(project)}
-                    disabled={accountSwitching || workspaceWriteBusy}
+                    onClick={() => openOrResumeProject(project)}
+                    disabled={accountSwitching || (workspaceWriteBusy && project.id !== activeProject?.id)}
                     aria-label={`打开项目 ${project.name}`}
                   >
                     <span className="atoms-project-card__visual" aria-hidden="true">
@@ -2186,8 +2219,8 @@ export default function Studio({
                       <span><UiIcon name="clock" />{formatRelativeDate(project.updatedAt ?? project.createdAt)}</span>
                       <button
                         type="button"
-                        onClick={() => void openProject(project)}
-                        disabled={accountSwitching || workspaceWriteBusy}
+                        onClick={() => openOrResumeProject(project)}
+                        disabled={accountSwitching || (workspaceWriteBusy && project.id !== activeProject?.id)}
                       >
                         {project.kind === "chat" ? "继续对话" : "继续构建"}
                         <UiIcon name="arrow-right" />
@@ -2243,7 +2276,7 @@ export default function Studio({
           workspaceBusy={workspaceWriteBusy}
           onHome={goHome}
           onProjects={goProjects}
-          onOpenProject={(project) => void openProject(project)}
+          onOpenProject={openOrResumeProject}
           onOpenDraft={resumeWorkspace}
           onLogin={() => void beginLogin()}
           onLogout={() => void handleLogout()}
@@ -2441,7 +2474,7 @@ export default function Studio({
 
             <div className="chat-thread" aria-live="polite">
               {errorMessage ? <ErrorBanner message={errorMessage} /> : null}
-              {chatLoading ? (
+              {chatLoading && !chatMessages.length && !chatSending ? (
                 <div className="chat-empty" role="status"><span><UiIcon name="message" /></span><strong>正在读取对话…</strong></div>
               ) : chatMessages.length ? (
                 chatMessages.map((message) => (
@@ -2591,48 +2624,63 @@ export default function Studio({
         </div>
       </header>
 
-      <div className="version-strip" aria-label="项目版本">
-        <span className="version-strip__label"><UiIcon name="history" />版本</span>
-        <div className="version-strip__list">
-          {versionsLoading ? <span className="version-strip__loading">正在读取版本…</span> : null}
-          {!versionsLoading && !versions.length ? <span className="version-strip__empty">确认方案后将生成 v1</span> : null}
-          {versions.map((version, index) => (
-            <button
-              className={version.id === activeVersion?.id ? "is-active" : ""}
-              type="button"
-              key={version.id}
-              onClick={() => chooseVersion(version)}
-              aria-current={version.id === activeVersion?.id ? "true" : undefined}
-              disabled={accountSwitching || workspaceWriteBusy}
-            >
-              <strong>v{version.ordinal}</strong>
-              <small>{index === 0 ? "当前" : "历史"}</small>
-              <time dateTime={version.createdAt ?? undefined}>{formatRelativeDate(version.createdAt)}</time>
-            </button>
-          ))}
-        </div>
-        {isHistoricalVersion ? (
-          <button
-            className="version-strip__restore"
-            type="button"
-            onClick={() => void rollbackVersion()}
-            disabled={rollbackLoading || accountSwitching}
-          >
-            {rollbackLoading ? "正在恢复…" : `恢复 v${activeVersion?.ordinal}`}
-          </button>
-        ) : (
-          <span className="version-strip__saved">
-            <span className="status-dot" />
-            {activeVersion ? "当前版本已保存" : pendingBuild ? "构建草稿已保留" : "尚未生成版本"}
-          </span>
-        )}
-      </div>
-
       <div
         className="studio-layout studio-layout--split"
         ref={splitContainerRef}
-        style={{ gridTemplateColumns: `minmax(360px, ${agentPanePercent}%) 10px minmax(480px, 1fr)` }}
+        style={{
+          gridTemplateColumns: versionPanelOpen
+            ? `220px minmax(360px, ${agentPanePercent}fr) 2px minmax(480px, ${100 - agentPanePercent}fr)`
+            : `minmax(360px, ${agentPanePercent}fr) 2px minmax(480px, ${100 - agentPanePercent}fr)`,
+        }}
       >
+        {versionPanelOpen ? (
+          <aside className="version-sidebar" aria-label="版本管理">
+            <header>
+              <span><UiIcon name="history" /></span>
+              <div><strong>版本管理</strong><small>历史版本不会被覆盖</small></div>
+            </header>
+            <div className="version-sidebar__status">
+              <span className="status-dot" />
+              {versionsLoading
+                ? "正在读取版本"
+                : activeVersion
+                  ? `当前查看 v${activeVersion.ordinal}`
+                  : pendingBuild
+                    ? "构建草稿已保留"
+                    : "尚未生成版本"}
+            </div>
+            <div className="version-sidebar__list">
+              {versionsLoading ? <span className="version-sidebar__empty">正在读取版本…</span> : null}
+              {!versionsLoading && !versions.length ? (
+                <span className="version-sidebar__empty">确认方案并完成构建后，将在这里生成 v1。</span>
+              ) : null}
+              {versions.map((version, index) => (
+                <button
+                  className={version.id === activeVersion?.id ? "is-active" : ""}
+                  type="button"
+                  key={version.id}
+                  onClick={() => chooseVersion(version)}
+                  aria-current={version.id === activeVersion?.id ? "true" : undefined}
+                  disabled={accountSwitching || workspaceWriteBusy}
+                >
+                  <span><strong>v{version.ordinal}</strong><small>{index === 0 ? "当前版本" : "历史版本"}</small></span>
+                  <time dateTime={version.createdAt ?? undefined}>{formatRelativeDate(version.createdAt)}</time>
+                </button>
+              ))}
+            </div>
+            {isHistoricalVersion ? (
+              <button
+                className="version-sidebar__restore"
+                type="button"
+                onClick={() => void rollbackVersion()}
+                disabled={rollbackLoading || accountSwitching}
+              >
+                {rollbackLoading ? "正在恢复…" : `恢复 v${activeVersion?.ordinal} 为新版本`}
+              </button>
+            ) : null}
+          </aside>
+        ) : null}
+
         <section className="agent-panel" aria-labelledby="agent-title">
           <header className="panel-header">
             <div>
@@ -2642,7 +2690,20 @@ export default function Studio({
                 <span>{phase === "building" ? "正在执行计划" : "与你一起构建"}</span>
               </div>
             </div>
-            <span className="agent-status"><i aria-hidden="true" /> 在线</span>
+            <div className="panel-header__tools">
+              <button
+                type="button"
+                className={versionPanelOpen ? "is-active" : ""}
+                onClick={() => setVersionPanelOpen((current) => !current)}
+                aria-expanded={versionPanelOpen}
+                aria-label={versionPanelOpen ? "收起版本管理" : "打开版本管理"}
+              >
+                <UiIcon name="history" />
+                <span>版本</span>
+                <strong>{activeVersion ? `v${activeVersion.ordinal}` : "草稿"}</strong>
+              </button>
+              <span className="agent-status"><i aria-hidden="true" /> 在线</span>
+            </div>
           </header>
 
           <div className="agent-scroll">
@@ -2792,51 +2853,6 @@ export default function Studio({
                         : "生成的完整网页会保存为项目版本，并支持继续调整和导出。"}
                     </p>
                   </div>
-                  <div className="plan-feedback">
-                    <label htmlFor="plan-feedback-input">
-                      <strong>继续调整当前方案</strong>
-                      <span>告诉 Agent 要增加、删除或修改什么，它会基于当前 BuildPlan 继续优化。</span>
-                    </label>
-                    <div>
-                      <textarea
-                        id="plan-feedback-input"
-                        value={planFeedback}
-                        onChange={(event) => setPlanFeedback(event.target.value)}
-                        placeholder="例如：不要使用 Canvas，改成 DOM 网格；再增加移动端触控方案……"
-                        rows={3}
-                        maxLength={1000}
-                        disabled={planningLoading || accountSwitching}
-                      />
-                      <button
-                        className="forge-button forge-button--secondary"
-                        type="button"
-                        onClick={adjustBuildPlan}
-                        disabled={!planFeedback.trim() || planningLoading || accountSwitching}
-                      >
-                        <span aria-hidden="true">↻</span>
-                        调整方案
-                      </button>
-                    </div>
-                  </div>
-                  <div className="build-plan__actions">
-                    <button
-                      className="forge-button forge-button--ghost"
-                      type="button"
-                      onClick={cancelPlan}
-                      disabled={accountSwitching}
-                    >
-                      返回调整
-                    </button>
-                    <button
-                      className="forge-button forge-button--primary"
-                      type="button"
-                      onClick={() => void executeBuild()}
-                      disabled={accountSwitching}
-                    >
-                      <span aria-hidden="true">✦</span>
-                      确认并构建
-                    </button>
-                  </div>
                 </section>
               ) : null
             ) : null}
@@ -2904,29 +2920,77 @@ export default function Studio({
             </div>
           </div>
 
-          {phase === "ready" && activeVersion ? (
-            <form className="refine-composer" onSubmit={submitRefinement}>
-              <label htmlFor="refine-input">继续调整这个应用</label>
-              <div className="refine-composer__box">
-                <textarea
-                  id="refine-input"
-                  value={instruction}
-                  onChange={(event) => setInstruction(event.target.value)}
-                  placeholder="例如：增加暂停按钮，把界面改成复古像素风……"
-                  rows={3}
-                  maxLength={800}
-                  disabled={accountSwitching}
-                />
-                <button
-                  type="submit"
-                  className="refine-composer__submit"
-                  aria-label="生成调整计划"
-                  disabled={!instruction.trim() || accountSwitching}
-                >
-                  <span aria-hidden="true">↑</span>
-                </button>
+          {(phase === "planning" && plan && !planningLoading) || (phase === "ready" && activeVersion) ? (
+            <form
+              className="web-agent-composer"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (phase === "planning") adjustBuildPlan();
+                else submitRefinement(event);
+              }}
+            >
+              <label className="sr-only" htmlFor="web-agent-input">
+                {phase === "planning" ? "继续调整当前方案" : "继续调整这个应用"}
+              </label>
+              <textarea
+                id="web-agent-input"
+                value={phase === "planning" ? planFeedback : instruction}
+                onChange={(event) => {
+                  if (phase === "planning") setPlanFeedback(event.target.value);
+                  else setInstruction(event.target.value);
+                }}
+                placeholder={phase === "planning"
+                  ? "继续告诉 Agent 要增加、删除或修改什么……"
+                  : "例如：增加暂停按钮，把界面改成复古像素风……"}
+                rows={3}
+                maxLength={phase === "planning" ? 1000 : 800}
+                disabled={accountSwitching || planningLoading}
+              />
+              <div className="web-agent-composer__footer">
+                <span>
+                  {phase === "planning"
+                    ? "方案修改会继续出现在当前对话中"
+                    : "调整会创建新版本，原版本可随时恢复"}
+                </span>
+                <div>
+                  {phase === "planning" ? (
+                    <>
+                      <button
+                        className="web-agent-composer__secondary"
+                        type="button"
+                        onClick={cancelPlan}
+                        disabled={accountSwitching}
+                      >
+                        取消方案
+                      </button>
+                      <button
+                        className="web-agent-composer__secondary"
+                        type="submit"
+                        disabled={!planFeedback.trim() || accountSwitching}
+                      >
+                        调整方案
+                      </button>
+                      <button
+                        className="web-agent-composer__primary"
+                        type="button"
+                        onClick={() => void executeBuild()}
+                        disabled={accountSwitching}
+                      >
+                        <UiIcon name="sparkles" />确认并构建
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      className="web-agent-composer__primary web-agent-composer__send"
+                      type="submit"
+                      aria-label="生成调整计划"
+                      disabled={!instruction.trim() || accountSwitching}
+                    >
+                      发送 <UiIcon name="arrow-up" />
+                    </button>
+                  )}
+                </div>
               </div>
-              <span>调整会创建新版本 · 原版本可随时恢复</span>
             </form>
           ) : null}
         </section>
@@ -3197,6 +3261,7 @@ function AtomsSidebar({
           onLogin={onLogin}
           onLogout={onLogout}
           compact
+          sidebarMenu
         />
       </div>
     </aside>
@@ -3211,6 +3276,7 @@ function AccountControl({
   onLogin,
   onLogout,
   compact = false,
+  sidebarMenu = false,
 }: {
   user: SessionUser | null;
   loading: boolean;
@@ -3219,8 +3285,27 @@ function AccountControl({
   onLogin: () => void;
   onLogout: () => void;
   compact?: boolean;
+  sidebarMenu?: boolean;
 }) {
-  const className = `account-control${compact ? " account-control--compact" : ""}`;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const className = `account-control${compact ? " account-control--compact" : ""}${sidebarMenu ? " account-control--sidebar" : ""}`;
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [menuOpen]);
 
   if (loading) {
     return (
@@ -3251,7 +3336,57 @@ function AccountControl({
   }
 
   const displayName = user.name || user.login;
+  const accountLabel = user.email?.split("@")[0]?.trim() || user.login;
   const initial = Array.from(displayName.trim())[0]?.toUpperCase() || "U";
+
+  if (sidebarMenu) {
+    return (
+      <div className={`${className} account-control--signed-in`} ref={menuRef}>
+        <button
+          className="account-control__sidebar-trigger"
+          type="button"
+          onClick={() => setMenuOpen((current) => !current)}
+          aria-expanded={menuOpen}
+          aria-haspopup="menu"
+          aria-label={`${accountLabel} 的账号菜单`}
+        >
+          <span className="account-control__avatar" aria-hidden="true">
+            {initial}
+            {user.avatarUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={user.avatarUrl}
+                alt=""
+                loading="lazy"
+                referrerPolicy="no-referrer"
+                onError={(event) => {
+                  event.currentTarget.hidden = true;
+                }}
+              />
+            ) : null}
+          </span>
+          <strong>{accountLabel}</strong>
+          <UiIcon name="chevron-down" />
+        </button>
+        {menuOpen ? (
+          <div className="account-control__menu" role="menu">
+            <span>已登录 GitHub</span>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
+                onLogout();
+              }}
+              disabled={loginLoading || logoutLoading}
+            >
+              {logoutLoading ? "退出中…" : "退出登录"}
+            </button>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
 
   return (
     <div className={`${className} account-control--signed-in`}>

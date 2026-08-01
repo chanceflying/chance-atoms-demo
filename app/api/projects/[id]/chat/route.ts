@@ -110,6 +110,71 @@ export async function POST(request: Request, { params }: RouteContext) {
     workspace = await resolveIdentity(request);
     const { id } = await params;
     const payload = await readJsonObject(request);
+    const db = await ensureDatabase();
+    const project = await findChatProject(db, id, workspace.id);
+    if (!project) return chatProjectNotFound(workspace);
+
+    if (Object.hasOwn(payload, "role") || Object.hasOwn(payload, "content")) {
+      const role = requiredRole(payload);
+      const content = requiredChatContent(payload);
+      const provider = role === "assistant"
+        ? optionalString(payload, "provider", 200) ?? null
+        : null;
+      const model = role === "assistant"
+        ? optionalString(payload, "model", 200) ?? null
+        : null;
+      const messageId = optionalString(payload, "messageId", 200) ?? crypto.randomUUID();
+      const requestedCreatedAt = optionalString(payload, "createdAt", 100);
+      const createdAt = requestedCreatedAt && !Number.isNaN(Date.parse(requestedCreatedAt))
+        ? new Date(requestedCreatedAt).toISOString()
+        : new Date().toISOString();
+
+      await db.batch([
+        db
+          .prepare(`
+            INSERT OR IGNORE INTO chat_messages (
+              id, project_id, role, content, provider, model, created_at
+            )
+            SELECT ?, id, ?, ?, ?, ?, ?
+            FROM projects
+            WHERE id = ? AND workspace_id = ? AND kind = 'chat'
+          `)
+          .bind(
+            messageId,
+            role,
+            content,
+            provider,
+            model,
+            createdAt,
+            id,
+            workspace.id,
+          ),
+        db
+          .prepare(`
+            UPDATE projects
+            SET updated_at = ?
+            WHERE id = ? AND workspace_id = ? AND kind = 'chat'
+          `)
+          .bind(createdAt, id, workspace.id),
+      ]);
+
+      const saved = await db
+        .prepare(`
+          SELECT id, project_id, role, content, provider, model, created_at
+          FROM chat_messages
+          WHERE id = ? AND project_id = ?
+        `)
+        .bind(messageId, id)
+        .first<DatabaseRow>();
+      if (!saved) throw new Error("Chat message was not saved");
+
+      return jsonResponse(
+        workspace,
+        { message: serializeChatMessage(saved), messages: [serializeChatMessage(saved)] },
+        { status: 201 },
+      );
+    }
+
     const userMessage = requiredMessage(payload, "userMessage");
     const assistantMessage = requiredMessage(payload, "assistantMessage");
     const provider = optionalString(payload, "provider", 200) ?? null;
@@ -119,11 +184,6 @@ export async function POST(request: Request, { params }: RouteContext) {
     const nowMs = Date.now();
     const userCreatedAt = new Date(nowMs).toISOString();
     const assistantCreatedAt = new Date(nowMs + 1).toISOString();
-    const db = await ensureDatabase();
-
-    const project = await findChatProject(db, id, workspace.id);
-    if (!project) return chatProjectNotFound(workspace);
-
     const results = await db.batch<DatabaseRow>([
       db
         .prepare(`
@@ -233,6 +293,20 @@ function requiredMessage(
 ) {
   const value = optionalString(payload, key, 200_000);
   if (!value) throw new RequestError(400, `${key} must not be empty`);
+  return value;
+}
+
+function requiredRole(payload: Record<string, unknown>) {
+  const role = payload.role;
+  if (role !== "user" && role !== "assistant") {
+    throw new RequestError(400, "role must be user or assistant");
+  }
+  return role;
+}
+
+function requiredChatContent(payload: Record<string, unknown>) {
+  const value = optionalString(payload, "content", 200_000);
+  if (!value) throw new RequestError(400, "content must not be empty");
   return value;
 }
 
