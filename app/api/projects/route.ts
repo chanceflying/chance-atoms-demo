@@ -30,6 +30,7 @@ export async function GET(request: Request) {
     const result = await db
       .prepare(`
         SELECT id, workspace_id, title, prompt, current_spec, records,
+               kind, memory_enabled, memory_content,
                current_version, created_at, updated_at
         FROM projects
         WHERE workspace_id = ?
@@ -53,24 +54,32 @@ export async function POST(request: Request) {
     assertSameOriginMutation(request);
     workspace = await resolveIdentity(request);
     const payload = await readJsonObject(request);
+    const kind = validProjectKind(payload.kind);
     const prompt = optionalString(payload, "prompt", 20_000) ?? "";
     const requestedTitle =
       optionalString(payload, "title", 200) ??
       optionalString(payload, "name", 200);
-    const title = requestedTitle || titleFromPrompt(prompt);
+    const title = requestedTitle || (kind === "chat"
+      ? titleFromPrompt(prompt, "Untitled conversation")
+      : titleFromPrompt(prompt));
     const rawArtifact = Object.hasOwn(payload, "artifact")
       ? payload.artifact
       : payload.spec === undefined
         ? payload.currentSpec
         : payload.spec;
-    const artifact = rawArtifact === undefined ? null : validArtifact(rawArtifact);
+    const artifact = kind === "web_app" && rawArtifact !== undefined
+      ? validArtifact(rawArtifact)
+      : null;
     const spec = jsonText(artifact ?? undefined, {});
     const recordInput = artifact && !isWebAppArtifact(artifact)
       ? (payload.records ?? artifact.seedData)
       : payload.records;
-    const records = artifact
+    const records = kind === "chat"
+      ? "[]"
+      : artifact
       ? jsonText(validRecordsForArtifact(recordInput ?? [], artifact), [])
       : jsonText(payload.records, []);
+    const memoryEnabled = kind === "chat" ? 1 : 0;
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
     const db = await ensureDatabase();
@@ -78,13 +87,25 @@ export async function POST(request: Request) {
     const project = await db
       .prepare(`
         INSERT INTO projects (
-          id, workspace_id, title, prompt, current_spec, records,
-          current_version, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
-        RETURNING id, workspace_id, title, prompt, current_spec, records,
+          id, workspace_id, kind, title, prompt, current_spec, records,
+          memory_enabled, memory_content, current_version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?)
+        RETURNING id, workspace_id, kind, title, prompt, current_spec, records,
+                  memory_enabled, memory_content,
                   current_version, created_at, updated_at
       `)
-      .bind(id, workspace.id, title, prompt, spec, records, now, now)
+      .bind(
+        id,
+        workspace.id,
+        kind,
+        title,
+        prompt,
+        spec,
+        records,
+        memoryEnabled,
+        now,
+        now,
+      )
       .first<DatabaseRow>();
     if (!project) {
       throw new Error("Project was not created");
@@ -99,10 +120,20 @@ export async function POST(request: Request) {
   }
 }
 
-function titleFromPrompt(prompt: string) {
+function titleFromPrompt(prompt: string, fallback = "Untitled project") {
   const normalized = prompt.replace(/\s+/g, " ").trim();
-  if (!normalized) return "Untitled project";
+  if (!normalized) return fallback;
   return normalized.length > 64 ? `${normalized.slice(0, 61)}...` : normalized;
+}
+
+type ProjectKind = "web_app" | "chat";
+
+function validProjectKind(value: unknown): ProjectKind {
+  if (value === undefined || value === null || value === "web_app") {
+    return "web_app";
+  }
+  if (value === "chat") return "chat";
+  throw new RequestError(400, "kind must be web_app or chat");
 }
 
 function validArtifact(value: unknown): StoredArtifact {

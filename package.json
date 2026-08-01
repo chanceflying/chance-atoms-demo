@@ -24,9 +24,9 @@
     "deploy:worker": "opennextjs-cloudflare deploy",
     "upload": "npm run build:worker && opennextjs-cloudflare upload",
     "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
-    "test": "node --import tsx --test tests/auth-core.test.ts tests/auth-db.test.ts tests/domain-runtime.test.ts tests/export-project.test.ts tests/model-routes.test.ts tests/rendered-html.test.ts",
+    "test": "node --import tsx --test tests/auth-core.test.ts tests/auth-db.test.ts tests/chat-persistence.test.ts tests/domain-runtime.test.ts tests/export-project.test.ts tests/model-routes.test.ts tests/rendered-html.test.ts",
     "smoke": "node scripts/smoke-http.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .open-next --ignore-pattern cloudflare-env.d.ts",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .open-next --ignore-pattern .wrangler --ignore-pattern cloudflare-env.d.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote"

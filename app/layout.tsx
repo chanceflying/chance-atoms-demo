@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import { headers } from "next/headers";
 import "./globals.css";
 
-const title = "Forge — AI Web App Builder";
+const title = "Forge — AI 创作工作台";
 const description =
-  "用一句话描述 Web App，审阅模型生成的 BuildPlan，再生成、运行、迭代和导出完整单文件应用。";
+  "在同一个 AI 工作台中持续对话，或从一句话开始规划、生成、运行和迭代完整的单文件 Web App。";
 
 export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();
@@ -27,7 +27,14 @@ export async function generateMetadata(): Promise<Metadata> {
     title: { default: title, template: "%s · Forge" },
     description,
     applicationName: "Forge",
-    keywords: ["AI Web App Builder", "BuildPlan", "WebAppArtifact", "vibe coding"],
+    keywords: [
+      "AI 工作台",
+      "AI 对话",
+      "AI Web App Builder",
+      "BuildPlan",
+      "WebAppArtifact",
+      "vibe coding",
+    ],
     openGraph: {
       type: "website",
       title,
@@ -39,7 +46,7 @@ export async function generateMetadata(): Promise<Metadata> {
           url: socialImage,
           width: 1744,
           height: 928,
-          alt: "Forge — AI Web App Builder",
+          alt: "Forge — AI 创作工作台",
         },
       ],
     },

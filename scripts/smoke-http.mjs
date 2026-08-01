@@ -69,7 +69,7 @@ const artifactV2 = {
 
 const home = await fetch(`${baseUrl}/`);
 assert.equal(home.status, 200);
-assert.match(await home.text(), /AI Web App Builder/);
+assert.match(await home.text(), /Forge/);
 
 const initial = await request("/api/projects");
 assert.equal(initial.response.status, 200);
@@ -118,11 +118,16 @@ assert.equal(crossOriginMutation.response.status, 403);
 
 const created = await request(
   "/api/projects",
-  json("POST", { name: "HTTP smoke Web App", prompt: "做一个俄罗斯方块" }),
+  json("POST", {
+    kind: "web_app",
+    name: "HTTP smoke Web App",
+    prompt: "做一个俄罗斯方块",
+  }),
   cookie,
 );
 assert.equal(created.response.status, 201);
 assert.equal(Object.hasOwn(created.body.project, "workspaceId"), false);
+assert.equal(created.body.project.kind, "web_app");
 const projectId = created.body.project.id;
 
 const versionOne = await request(
@@ -203,9 +208,139 @@ assert.deepEqual(Array.from(new Uint8Array(archive.body).slice(0, 4)), [
   0x50, 0x4b, 0x03, 0x04,
 ]);
 
+const chatCreated = await request(
+  "/api/projects",
+  json("POST", {
+    kind: "chat",
+    name: "HTTP smoke 对话",
+    prompt: "",
+  }),
+  cookie,
+);
+assert.equal(chatCreated.response.status, 201);
+assert.equal(chatCreated.body.project.kind, "chat");
+assert.equal(chatCreated.body.project.memoryEnabled, true);
+const chatProjectId = chatCreated.body.project.id;
+
+const chatVersions = await request(
+  `/api/projects/${chatProjectId}/versions`,
+  {},
+  cookie,
+);
+assert.equal(chatVersions.response.status, 404);
+
+const rejectedChatVersion = await request(
+  `/api/projects/${chatProjectId}/versions`,
+  json("POST", {
+    artifact: artifactV1,
+    buildPlan: planV1,
+    prompt: "不能写入对话项目",
+  }),
+  cookie,
+);
+assert.equal(rejectedChatVersion.response.status, 404);
+
+const rejectedChatRollback = await request(
+  `/api/projects/${chatProjectId}/versions`,
+  json("POST", { action: "rollback", sourceVersionId: versionOneId }),
+  cookie,
+);
+assert.equal(rejectedChatRollback.response.status, 404);
+
+const rejectedChatVersionEdit = await request(
+  `/api/projects/${chatProjectId}/versions`,
+  json("PATCH", { versionId: versionOneId, records: [] }),
+  cookie,
+);
+assert.equal(rejectedChatVersionEdit.response.status, 404);
+
+const unchangedChatProject = await request(
+  `/api/projects/${chatProjectId}`,
+  {},
+  cookie,
+);
+assert.equal(unchangedChatProject.response.status, 200);
+assert.equal(unchangedChatProject.body.project.currentVersion, 0);
+
+const emptyChat = await request(
+  `/api/projects/${chatProjectId}/chat`,
+  {},
+  cookie,
+);
+assert.equal(emptyChat.response.status, 200);
+assert.deepEqual(emptyChat.body.memory, { enabled: true, content: "" });
+assert.deepEqual(emptyChat.body.messages, []);
+
+const configuredMemory = await request(
+  `/api/projects/${chatProjectId}/chat`,
+  json("PATCH", {
+    memoryEnabled: true,
+    memoryContent: "用户希望被称为 Chance。",
+  }),
+  cookie,
+);
+assert.equal(configuredMemory.response.status, 200);
+assert.deepEqual(configuredMemory.body.memory, {
+  enabled: true,
+  content: "用户希望被称为 Chance。",
+});
+
+const savedTurn = await request(
+  `/api/projects/${chatProjectId}/chat`,
+  json("POST", {
+    userMessage: "请记住我的称呼。",
+    assistantMessage: "好的，Chance。",
+    provider: "fixture",
+    model: "smoke",
+  }),
+  cookie,
+);
+assert.equal(savedTurn.response.status, 201);
+assert.equal(savedTurn.body.messages.length, 2);
+assert.deepEqual(
+  savedTurn.body.messages.map((message) => message.role),
+  ["user", "assistant"],
+);
+
+const persistedChat = await request(
+  `/api/projects/${chatProjectId}/chat`,
+  {},
+  cookie,
+);
+assert.equal(persistedChat.response.status, 200);
+assert.equal(persistedChat.body.messages.length, 2);
+assert.equal(persistedChat.body.messages[1].provider, "fixture");
+assert.equal(persistedChat.body.memoryContent, "用户希望被称为 Chance。");
+
+const ownedProjects = await request("/api/projects", {}, cookie);
+assert.equal(ownedProjects.response.status, 200);
+assert.equal(ownedProjects.body.projects.length, 2);
+assert.deepEqual(
+  new Set(ownedProjects.body.projects.map((project) => project.kind)),
+  new Set(["web_app", "chat"]),
+);
+
 const isolated = await request("/api/projects");
 assert.equal(isolated.response.status, 200);
 assert.deepEqual(isolated.body.projects, []);
+
+const isolatedChat = await request(`/api/projects/${chatProjectId}/chat`);
+assert.equal(isolatedChat.response.status, 404);
+
+const removedChat = await request(
+  `/api/projects/${chatProjectId}`,
+  { method: "DELETE" },
+  cookie,
+);
+assert.equal(removedChat.response.status, 200);
+assert.equal(removedChat.body.deleted, true);
+
+const deletedChatHistory = await request(
+  `/api/projects/${chatProjectId}/chat`,
+  {},
+  cookie,
+);
+assert.equal(deletedChatHistory.response.status, 404);
 
 const removed = await request(`/api/projects/${projectId}`, { method: "DELETE" }, cookie);
 assert.equal(removed.response.status, 200);
@@ -221,7 +356,10 @@ console.log(
         "guest session and GitHub auth boundary",
         "mutation origin boundary",
         "workspace isolation",
-        "Web App project persistence",
+        "Web App and chat project persistence",
+        "project kind management and deletion",
+        "capability boundary between chat and Web App versions",
+        "chat history and configured long-term memory",
         "ephemeral gameplay records",
         "BuildPlan and reasoning summary persistence",
         "version evolution",

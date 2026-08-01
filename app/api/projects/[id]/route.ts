@@ -27,7 +27,8 @@ import {
 type RouteContext = { params: Promise<{ id: string }> };
 
 const PROJECT_COLUMNS = `
-  id, workspace_id, title, prompt, current_spec, records,
+  id, workspace_id, kind, title, prompt, current_spec, records,
+  memory_enabled, memory_content,
   current_version, created_at, updated_at
 `;
 
@@ -66,6 +67,18 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     const assignments: string[] = [];
     const values: unknown[] = [];
     let artifact: StoredArtifact | null = null;
+    const existing = await db
+      .prepare(`
+        SELECT kind, current_spec
+        FROM projects
+        WHERE id = ? AND workspace_id = ?
+      `)
+      .bind(id, workspace.id)
+      .first<DatabaseRow>();
+    if (!existing) {
+      return jsonResponse(workspace, { error: "Project not found" }, { status: 404 });
+    }
+    const isChatProject = existing.kind === "chat";
 
     if (Object.hasOwn(payload, "title")) {
       const title = optionalString(payload, "title", 200);
@@ -79,6 +92,9 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       || Object.hasOwn(payload, "spec")
       || Object.hasOwn(payload, "currentSpec")
     ) {
+      if (isChatProject) {
+        throw new RequestError(400, "chat projects do not have Web App artifacts");
+      }
       const rawArtifact = Object.hasOwn(payload, "artifact")
         ? payload.artifact
         : Object.hasOwn(payload, "spec")
@@ -90,19 +106,11 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     }
 
     if (Object.hasOwn(payload, "records")) {
+      if (isChatProject) {
+        throw new RequestError(400, "chat projects do not have Web App records");
+      }
       if (!artifact) {
-        const current = await db
-          .prepare(`
-            SELECT current_spec
-            FROM projects
-            WHERE id = ? AND workspace_id = ?
-          `)
-          .bind(id, workspace.id)
-          .first<DatabaseRow>();
-        if (!current) {
-          return jsonResponse(workspace, { error: "Project not found" }, { status: 404 });
-        }
-        artifact = optionalArtifact(parseStoredJson(current.current_spec, {}));
+        artifact = optionalArtifact(parseStoredJson(existing.current_spec, {}));
       }
       assignments.push("records = ?");
       values.push(
@@ -116,6 +124,9 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     }
 
     if (Object.hasOwn(payload, "currentVersion")) {
+      if (isChatProject) {
+        throw new RequestError(400, "chat projects do not have Web App versions");
+      }
       assignments.push("current_version = ?");
       values.push(optionalNonNegativeInteger(payload, "currentVersion"));
     }
@@ -182,6 +193,17 @@ export async function DELETE(request: Request, { params }: RouteContext) {
     const results = await db.batch<DatabaseRow>([
       db
         .prepare(`
+          DELETE FROM chat_messages
+          WHERE project_id = ?
+            AND EXISTS (
+              SELECT 1 FROM projects
+              WHERE projects.id = chat_messages.project_id
+                AND projects.workspace_id = ?
+            )
+        `)
+        .bind(id, workspace.id),
+      db
+        .prepare(`
           DELETE FROM versions
           WHERE project_id = ?
             AND EXISTS (
@@ -200,7 +222,7 @@ export async function DELETE(request: Request, { params }: RouteContext) {
         .bind(id, workspace.id),
     ]);
 
-    if (!results[1].results[0]) {
+    if (!results[2].results[0]) {
       return jsonResponse(workspace, { error: "Project not found" }, { status: 404 });
     }
     return jsonResponse(workspace, { deleted: true, id });

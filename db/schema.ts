@@ -12,10 +12,13 @@ export const projects = sqliteTable(
   {
     id: text("id").primaryKey(),
     workspaceId: text("workspace_id").notNull(),
+    kind: text("kind").notNull().default("web_app"),
     title: text("title").notNull(),
     prompt: text("prompt").notNull().default(""),
     currentSpec: text("current_spec").notNull().default("{}"),
     records: text("records").notNull().default("[]"),
+    memoryEnabled: integer("memory_enabled").notNull().default(0),
+    memoryContent: text("memory_content").notNull().default(""),
     currentVersion: integer("current_version").notNull().default(0),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -24,6 +27,27 @@ export const projects = sqliteTable(
     index("idx_projects_workspace_updated").on(
       table.workspaceId,
       table.updatedAt,
+    ),
+  ],
+);
+
+export const chatMessages = sqliteTable(
+  "chat_messages",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    role: text("role").notNull(),
+    content: text("content").notNull(),
+    provider: text("provider"),
+    model: text("model"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_chat_messages_project_created").on(
+      table.projectId,
+      table.createdAt,
     ),
   ],
 );

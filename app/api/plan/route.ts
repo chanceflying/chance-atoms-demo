@@ -73,6 +73,8 @@ type PlanBody = {
   prompt?: unknown;
   instruction?: unknown;
   previousArtifact?: unknown;
+  currentPlan?: unknown;
+  planFeedback?: unknown;
 };
 
 export async function POST(request: Request) {
@@ -81,13 +83,47 @@ export async function POST(request: Request) {
 
   const prompt = cleanText(parsedBody.prompt);
   const instruction = cleanText(parsedBody.instruction);
-  if (!prompt && !instruction) {
+  const hasCurrentPlan =
+    parsedBody.currentPlan !== undefined && parsedBody.currentPlan !== null;
+  const hasPlanFeedback =
+    parsedBody.planFeedback !== undefined && parsedBody.planFeedback !== null;
+  if (hasCurrentPlan !== hasPlanFeedback) {
+    return NextResponse.json(
+      { error: "调整构建方案时，需要同时提供当前方案和调整意见。" },
+      { status: 400 },
+    );
+  }
+
+  let currentPlan: ReturnType<typeof parseBuildPlan> | undefined;
+  const planFeedback = cleanText(parsedBody.planFeedback);
+  if (hasCurrentPlan) {
+    try {
+      currentPlan = parseBuildPlan(parsedBody.currentPlan);
+    } catch {
+      return NextResponse.json(
+        { error: "当前构建方案数据无效，请重新生成。" },
+        { status: 400 },
+      );
+    }
+    if (!planFeedback) {
+      return NextResponse.json(
+        { error: "请输入对当前构建方案的调整意见。" },
+        { status: 400 },
+      );
+    }
+  }
+
+  if (!prompt && !instruction && !currentPlan) {
     return NextResponse.json(
       { error: "请先描述你想创建或修改的 Web App。" },
       { status: 400 },
     );
   }
-  if (prompt.length > MAX_INPUT_LENGTH || instruction.length > MAX_INPUT_LENGTH) {
+  if (
+    prompt.length > MAX_INPUT_LENGTH ||
+    instruction.length > MAX_INPUT_LENGTH ||
+    planFeedback.length > MAX_INPUT_LENGTH
+  ) {
     return NextResponse.json(
       { error: `单次描述请控制在 ${MAX_INPUT_LENGTH} 字以内。` },
       { status: 400 },
@@ -129,6 +165,8 @@ export async function POST(request: Request) {
       prompt,
       instruction,
       previousArtifact,
+      currentPlan,
+      planFeedback,
     });
     return NextResponse.json({
       ...result,
@@ -150,16 +188,34 @@ async function planWithOpenAI({
   prompt,
   instruction,
   previousArtifact,
+  currentPlan,
+  planFeedback,
 }: {
   apiKey: string;
   model: string;
   prompt: string;
   instruction: string;
   previousArtifact?: WebAppArtifact;
+  currentPlan?: ReturnType<typeof parseBuildPlan>;
+  planFeedback: string;
 }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 90_000);
-  const task = previousArtifact
+  const task = currentPlan
+    ? [
+        "Revise the current BuildPlan using the user's feedback.",
+        "Preserve decisions and requirements that the feedback does not change.",
+        prompt ? `Original request: ${prompt}` : "",
+        instruction ? `Existing change request: ${instruction}` : "",
+        previousArtifact
+          ? `Existing artifact: ${JSON.stringify(previousArtifact)}`
+          : "",
+        `Current BuildPlan: ${JSON.stringify(currentPlan)}`,
+        `User feedback: ${planFeedback}`,
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    : previousArtifact
     ? [
         "Plan the next version of the existing self-contained Web App.",
         `Original request: ${prompt || previousArtifact.description}`,
@@ -183,7 +239,7 @@ async function planWithOpenAI({
           {
             role: "system",
             content:
-              "You are the planning stage of Chance Atoms. Return only the requested BuildPlan. Produce a concrete plan for one self-contained HTML/CSS/JavaScript Web App. The plan must reflect the user's actual request and existing artifact, not a generic fixed checklist. Cover product behavior, interaction design, implementation steps, assumptions, and testable acceptance criteria. Do not generate code yet. Runtime data is ephemeral; project source and versions are persisted by the host application.",
+              "You are the planning stage of Chance Atoms. Return only the requested BuildPlan. Produce or revise a concrete plan for one self-contained HTML/CSS/JavaScript Web App. The plan must reflect the user's actual request, existing artifact, current plan, and plan feedback when provided, not a generic fixed checklist. When revising, incorporate the feedback while preserving unaffected requirements. Cover product behavior, interaction design, implementation steps, assumptions, and testable acceptance criteria. Do not generate code yet. Runtime data is ephemeral; project source and versions are persisted by the host application.",
           },
           { role: "user", content: task },
         ],

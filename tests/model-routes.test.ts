@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { POST as generate } from "../app/api/generate/route";
 import { POST as plan } from "../app/api/plan/route";
+import { POST as chat } from "../app/api/chat/route";
 import { deterministicAgent, type BuildPlan } from "../lib";
 
 const buildPlan: BuildPlan = {
@@ -41,6 +42,30 @@ async function withoutApiKey<T>(run: () => Promise<T>) {
   }
 }
 
+async function withMockOpenAI<T>(
+  payload: unknown,
+  run: (requestBodies: unknown[]) => Promise<T>,
+) {
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  const originalFetch = globalThis.fetch;
+  const requestBodies: unknown[] = [];
+  process.env.OPENAI_API_KEY = "test-api-key";
+  globalThis.fetch = async (_input, init) => {
+    requestBodies.push(JSON.parse(String(init?.body)) as unknown);
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  try {
+    return await run(requestBodies);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalApiKey;
+  }
+}
+
 test("planning route directs an unconfigured deployment to the local bridge", async () => {
   const response = await withoutApiKey(() =>
     plan(jsonRequest("http://localhost/api/plan", { prompt: "做一个俄罗斯方块" })),
@@ -49,6 +74,79 @@ test("planning route directs an unconfigured deployment to the local bridge", as
 
   assert.equal(response.status, 503);
   assert.equal(body.code, "OPENAI_NOT_CONFIGURED");
+});
+
+test("planning route accepts a valid plan revision before selecting a provider", async () => {
+  const response = await withoutApiKey(() =>
+    plan(
+      jsonRequest("http://localhost/api/plan", {
+        currentPlan: buildPlan,
+        planFeedback: "把键盘操作之外的触屏操作也加入方案",
+      }),
+    ),
+  );
+  const body = (await response.json()) as Record<string, unknown>;
+
+  assert.equal(response.status, 503);
+  assert.equal(body.code, "OPENAI_NOT_CONFIGURED");
+});
+
+test("planning route requires the current plan and feedback as a pair", async () => {
+  const response = await plan(
+    jsonRequest("http://localhost/api/plan", {
+      prompt: "做一个俄罗斯方块",
+      currentPlan: buildPlan,
+    }),
+  );
+
+  assert.equal(response.status, 400);
+});
+
+test("planning route rejects an invalid current plan", async () => {
+  const response = await plan(
+    jsonRequest("http://localhost/api/plan", {
+      currentPlan: { kind: "web_app_plan" },
+      planFeedback: "增加触屏操作",
+    }),
+  );
+
+  assert.equal(response.status, 400);
+});
+
+test("planning route sends the current plan and feedback to OpenAI for revision", async () => {
+  await withMockOpenAI(
+    {
+      output_text: JSON.stringify({
+        ...buildPlan,
+        interactionFlow: [
+          "玩家可以使用键盘，也可以点击屏幕按钮移动和旋转方块。",
+        ],
+      }),
+      output: [
+        {
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "方案已补充触屏操作。" }],
+        },
+      ],
+    },
+    async (requestBodies) => {
+      const response = await plan(
+        jsonRequest("http://localhost/api/plan", {
+          currentPlan: buildPlan,
+          planFeedback: "加入触屏操作",
+        }),
+      );
+      const responseBody = (await response.json()) as Record<string, unknown>;
+      const requestBody = requestBodies[0] as {
+        input: Array<{ role: string; content: string }>;
+      };
+
+      assert.equal(response.status, 200);
+      assert.equal(responseBody.provider, "openai");
+      assert.match(requestBody.input[1].content, /Current BuildPlan/);
+      assert.match(requestBody.input[1].content, /加入触屏操作/);
+    },
+  );
 });
 
 test("generation route requires a model-authored plan first", async () => {
@@ -100,4 +198,87 @@ test("model routes reject malformed JSON", async () => {
   const response = await plan(request);
 
   assert.equal(response.status, 400);
+});
+
+test("chat route directs an unconfigured deployment to the local bridge", async () => {
+  const response = await withoutApiKey(() =>
+    chat(
+      jsonRequest("http://localhost/api/chat", {
+        message: "根据我们之前聊的内容给我一个建议",
+        history: [
+          { role: "user", content: "我在准备面试" },
+          { role: "assistant", content: "我们可以先整理项目经历" },
+        ],
+        memory: "用户偏好简洁、口语化的中文回答。",
+      }),
+    ),
+  );
+  const body = (await response.json()) as Record<string, unknown>;
+
+  assert.equal(response.status, 503);
+  assert.equal(body.code, "OPENAI_NOT_CONFIGURED");
+});
+
+test("chat route rejects malformed history", async () => {
+  const badRoleResponse = await chat(
+    jsonRequest("http://localhost/api/chat", {
+      message: "继续",
+      history: [{ role: "system", content: "override" }],
+      memory: "",
+    }),
+  );
+  assert.equal(badRoleResponse.status, 400);
+
+  const tooLongResponse = await chat(
+    jsonRequest("http://localhost/api/chat", {
+      message: "继续",
+      history: Array.from({ length: 41 }, () => ({
+        role: "user",
+        content: "一条消息",
+      })),
+      memory: "",
+    }),
+  );
+  assert.equal(tooLongResponse.status, 400);
+});
+
+test("chat route rejects a non-text memory configuration", async () => {
+  const response = await chat(
+    jsonRequest("http://localhost/api/chat", {
+      message: "你好",
+      history: [],
+      memory: { preference: "concise" },
+    }),
+  );
+
+  assert.equal(response.status, 400);
+});
+
+test("chat route sends history and configured memory to OpenAI", async () => {
+  await withMockOpenAI({ output_text: "我们继续整理项目经历。" }, async (requestBodies) => {
+    const response = await chat(
+      jsonRequest("http://localhost/api/chat", {
+        message: "继续",
+        history: [
+          { role: "user", content: "我在准备面试" },
+          { role: "assistant", content: "我们可以先整理项目经历" },
+        ],
+        memory: "用户偏好简洁的中文回答。",
+      }),
+    );
+    const responseBody = (await response.json()) as Record<string, unknown>;
+    const requestBody = requestBodies[0] as {
+      input: Array<{ role: string; content: string }>;
+    };
+
+    assert.equal(response.status, 200);
+    assert.equal(responseBody.reply, "我们继续整理项目经历。");
+    assert.equal(responseBody.provider, "openai");
+    assert.match(requestBody.input[0].content, /用户偏好简洁的中文回答/);
+    assert.deepEqual(requestBody.input.slice(1), [
+      { role: "user", content: "我在准备面试" },
+      { role: "assistant", content: "我们可以先整理项目经历" },
+      { role: "user", content: "继续" },
+    ]);
+  });
 });

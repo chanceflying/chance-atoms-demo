@@ -5,11 +5,13 @@ export type DatabaseRow = Record<string, unknown>;
 
 export function serializeProject(row: DatabaseRow) {
   const artifact = parseStoredJson(row.current_spec, {});
+  const kind = row.kind === "chat" ? "chat" : "web_app";
   const records = isWebAppArtifact(artifact)
     ? []
     : parseStoredJson(row.records, []);
   return {
     id: row.id,
+    kind,
     title: row.title,
     name: row.title,
     prompt: row.prompt,
@@ -17,6 +19,9 @@ export function serializeProject(row: DatabaseRow) {
     spec: artifact,
     currentSpec: artifact,
     records,
+    memoryEnabled: Boolean(row.memory_enabled),
+    memoryContent:
+      typeof row.memory_content === "string" ? row.memory_content : "",
     currentVersion: row.current_version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -45,6 +50,18 @@ export function serializeVersion(row: DatabaseRow) {
       ? rawReasoningSummary.filter((item): item is string => typeof item === "string")
       : [],
     stages: parseStoredJson(row.stages, []),
+    createdAt: row.created_at,
+  };
+}
+
+export function serializeChatMessage(row: DatabaseRow) {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    role: row.role === "assistant" ? "assistant" : "user",
+    content: typeof row.content === "string" ? row.content : "",
+    provider: typeof row.provider === "string" ? row.provider : null,
+    model: typeof row.model === "string" ? row.model : null,
     createdAt: row.created_at,
   };
 }

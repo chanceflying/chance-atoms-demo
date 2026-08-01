@@ -38,6 +38,9 @@ export async function GET(request: Request, { params }: RouteContext) {
     workspace = await resolveIdentity(request);
     const { id } = await params;
     const db = await ensureDatabase();
+    if (!(await hasWebAppProject(db, id, workspace.id))) {
+      return projectNotFound(workspace);
+    }
     const result = await db
       .prepare(`
         SELECT v.id, v.project_id, v.version, v.instruction, v.spec,
@@ -46,7 +49,7 @@ export async function GET(request: Request, { params }: RouteContext) {
                v.created_at
         FROM versions AS v
         INNER JOIN projects AS p ON p.id = v.project_id
-        WHERE v.project_id = ? AND p.workspace_id = ?
+        WHERE v.project_id = ? AND p.workspace_id = ? AND p.kind = 'web_app'
         ORDER BY v.version DESC
         LIMIT 100
       `)
@@ -68,6 +71,10 @@ export async function POST(request: Request, { params }: RouteContext) {
     workspace = await resolveIdentity(request);
     const { id } = await params;
     const payload = await readJsonObject(request);
+    const db = await ensureDatabase();
+    if (!(await hasWebAppProject(db, id, workspace.id))) {
+      return projectNotFound(workspace);
+    }
     if (payload.action !== undefined && payload.action !== "rollback") {
       throw new RequestError(400, "action must be rollback when provided");
     }
@@ -87,7 +94,6 @@ export async function POST(request: Request, { params }: RouteContext) {
       : Object.hasOwn(payload, "spec")
         ? payload.spec
         : payload.currentSpec;
-    const db = await ensureDatabase();
     const parsedArtifact = hasArtifact ? validArtifact(rawArtifact) : null;
     const spec = parsedArtifact ? jsonText(parsedArtifact, {}) : null;
     let records: string | null = parsedArtifact && isWebAppArtifact(parsedArtifact)
@@ -100,7 +106,7 @@ export async function POST(request: Request, { params }: RouteContext) {
           .prepare(`
             SELECT current_spec
             FROM projects
-            WHERE id = ? AND workspace_id = ?
+            WHERE id = ? AND workspace_id = ? AND kind = 'web_app'
           `)
           .bind(id, workspace.id)
           .first<DatabaseRow>();
@@ -138,7 +144,7 @@ export async function POST(request: Request, { params }: RouteContext) {
                  COALESCE(?, records), COALESCE(?, prompt), ?, ?, ?,
                  COALESCE(?, '{}'), COALESCE(?, '[]'), ?, ?
           FROM projects
-          WHERE id = ? AND workspace_id = ?
+          WHERE id = ? AND workspace_id = ? AND kind = 'web_app'
           RETURNING id, project_id, version, instruction, spec, records, prompt,
                     provider, model, warning, build_plan, reasoning_summary,
                     stages, created_at
@@ -167,14 +173,14 @@ export async function POST(request: Request, { params }: RouteContext) {
               prompt = COALESCE(?, prompt),
               current_version = current_version + 1,
               updated_at = ?
-          WHERE id = ? AND workspace_id = ?
+          WHERE id = ? AND workspace_id = ? AND kind = 'web_app'
         `)
         .bind(spec, records, prompt, now, id, workspace.id),
       db
         .prepare(`
           SELECT ${PROJECT_COLUMNS}
           FROM projects
-          WHERE id = ? AND workspace_id = ?
+          WHERE id = ? AND workspace_id = ? AND kind = 'web_app'
         `)
         .bind(id, workspace.id),
     ]);
@@ -205,6 +211,10 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     workspace = await resolveIdentity(request);
     const { id } = await params;
     const payload = await readJsonObject(request);
+    const db = await ensureDatabase();
+    if (!(await hasWebAppProject(db, id, workspace.id))) {
+      return projectNotFound(workspace);
+    }
     if (!Object.hasOwn(payload, "records")) {
       throw new RequestError(400, "records is required");
     }
@@ -213,13 +223,13 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       throw new RequestError(400, "versionId is required");
     }
     const now = new Date().toISOString();
-    const db = await ensureDatabase();
     const current = await db
       .prepare(`
         SELECT v.spec
         FROM versions AS v
         INNER JOIN projects AS p ON p.id = v.project_id
         WHERE v.id = ? AND v.project_id = ? AND p.workspace_id = ?
+          AND p.kind = 'web_app'
           AND v.version = p.current_version
       `)
       .bind(versionId, id, workspace.id)
@@ -244,7 +254,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
           WHERE id = ? AND project_id = ?
             AND version = (
               SELECT current_version FROM projects
-              WHERE id = ? AND workspace_id = ?
+              WHERE id = ? AND workspace_id = ? AND kind = 'web_app'
             )
           RETURNING id
         `)
@@ -253,7 +263,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
         .prepare(`
           UPDATE projects
           SET records = ?, updated_at = ?
-          WHERE id = ? AND workspace_id = ?
+          WHERE id = ? AND workspace_id = ? AND kind = 'web_app'
             AND current_version = (
               SELECT version FROM versions
               WHERE id = ? AND project_id = ?
@@ -331,6 +341,7 @@ async function rollbackVersion(
       FROM versions AS v
       INNER JOIN projects AS p ON p.id = v.project_id
       WHERE v.id = ? AND v.project_id = ? AND p.workspace_id = ?
+        AND p.kind = 'web_app'
     `)
     .bind(sourceVersionId, projectId, workspace.id)
     .first<DatabaseRow>();
@@ -360,7 +371,7 @@ async function rollbackVersion(
         )
         SELECT ?, id, current_version + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         FROM projects
-        WHERE id = ? AND workspace_id = ?
+        WHERE id = ? AND workspace_id = ? AND kind = 'web_app'
         RETURNING id, project_id, version, instruction, spec, records, prompt,
                   provider, model, warning, build_plan, reasoning_summary,
                   stages, created_at
@@ -386,14 +397,14 @@ async function rollbackVersion(
         UPDATE projects
         SET current_spec = ?, records = ?, current_version = current_version + 1,
             updated_at = ?
-        WHERE id = ? AND workspace_id = ?
+        WHERE id = ? AND workspace_id = ? AND kind = 'web_app'
       `)
       .bind(source.spec, sourceRecords, now, projectId, workspace.id),
     db
       .prepare(`
         SELECT ${PROJECT_COLUMNS}
         FROM projects
-        WHERE id = ? AND workspace_id = ?
+        WHERE id = ? AND workspace_id = ? AND kind = 'web_app'
       `)
       .bind(projectId, workspace.id),
   ]);
@@ -412,4 +423,25 @@ async function rollbackVersion(
     },
     { status: 201 },
   );
+}
+
+async function hasWebAppProject(
+  db: D1Database,
+  projectId: string,
+  workspaceId: string,
+) {
+  const project = await db
+    .prepare(`
+      SELECT 1 AS found
+      FROM projects
+      WHERE id = ? AND workspace_id = ? AND kind = 'web_app'
+      LIMIT 1
+    `)
+    .bind(projectId, workspaceId)
+    .first<{ found: number }>();
+  return Boolean(project);
+}
+
+function projectNotFound(workspace: Workspace) {
+  return jsonResponse(workspace, { error: "Project not found" }, { status: 404 });
 }

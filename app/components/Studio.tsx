@@ -24,15 +24,37 @@ type StudioPhase = "home" | "planning" | "building" | "ready";
 type InspectorTab = "preview" | "code" | "spec";
 type PreviewSize = "desktop" | "mobile";
 type RetryAction = "projects" | "versions" | "plan" | "build" | "rollback" | null;
+type ProjectKind = "web_app" | "chat";
 
 type ProjectItem = {
   id: string;
+  kind: ProjectKind;
   name: string;
   prompt: string;
   records: AppRecord[];
   currentVersion: number;
   createdAt: string | null;
   updatedAt: string | null;
+};
+
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  provider: string | null;
+  model: string | null;
+  createdAt: string | null;
+};
+
+type ChatMemory = {
+  enabled: boolean;
+  content: string;
+};
+
+type ChatResponse = {
+  reply: string;
+  provider: string | null;
+  model: string | null;
 };
 
 type VersionItem = {
@@ -275,12 +297,39 @@ function normalizeProject(value: unknown): ProjectItem | null {
   if (!id) return null;
   return {
     id,
+    kind: row.kind === "chat" ? "chat" : "web_app",
     name: readString(row.name ?? row.title, "未命名应用"),
     prompt: readString(row.prompt ?? row.originalPrompt ?? row.description),
     records: parseRecords(row.records),
     currentVersion: readNumber(row.currentVersion ?? row.current_version, 0),
     createdAt: readNullableString(row.createdAt ?? row.created_at),
     updatedAt: readNullableString(row.updatedAt ?? row.updated_at),
+  };
+}
+
+function normalizeChatMessage(value: unknown, index: number): ChatMessage | null {
+  if (!isRecord(value)) return null;
+  const role = value.role === "assistant" ? "assistant" : value.role === "user" ? "user" : null;
+  const content = readString(value.content).trim();
+  if (!role || !content) return null;
+  return {
+    id: readString(value.id, `chat-message-${index}`),
+    role,
+    content,
+    provider: readNullableString(value.provider),
+    model: readNullableString(value.model),
+    createdAt: readNullableString(value.createdAt ?? value.created_at),
+  };
+}
+
+function parseChatResponse(payload: unknown): ChatResponse {
+  if (!isRecord(payload)) throw new Error("对话服务没有返回有效结果，请重试。");
+  const reply = readString(payload.reply).trim();
+  if (!reply) throw new Error("模型没有返回对话内容，请重试。");
+  return {
+    reply,
+    provider: readNullableString(payload.provider),
+    model: readNullableString(payload.model),
   };
 }
 
@@ -435,7 +484,11 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
-async function planWithLocalCodex(build: PendingBuild): Promise<PlanResponse> {
+async function planWithLocalCodex(
+  build: PendingBuild,
+  currentPlan?: BuildPlan,
+  planFeedback?: string,
+): Promise<PlanResponse> {
   const response = await fetch(`${LOCAL_CODEX_BRIDGE}/plan`, {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
@@ -446,6 +499,8 @@ async function planWithLocalCodex(build: PendingBuild): Promise<PlanResponse> {
       ...(build.previousArtifact
         ? { previousArtifact: build.previousArtifact }
         : {}),
+      ...(currentPlan ? { currentPlan } : {}),
+      ...(planFeedback ? { planFeedback } : {}),
     }),
   });
   const payload = await readResponse(response);
@@ -461,6 +516,27 @@ async function planWithLocalCodex(build: PendingBuild): Promise<PlanResponse> {
     provider: result.provider ?? "codex_session",
     model: result.model ?? "Codex subscription",
   };
+}
+
+async function chatWithLocalCodex(body: {
+  message: string;
+  history: Array<{ role: "user" | "assistant"; content: string }>;
+  memory: string;
+}): Promise<ChatResponse> {
+  const response = await fetch(`${LOCAL_CODEX_BRIDGE}/chat`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    mode: "cors",
+    body: JSON.stringify(body),
+  });
+  const payload = await readResponse(response);
+  if (!response.ok) {
+    const message = isRecord(payload)
+      ? readString(payload.error ?? payload.message, "本机 Codex 对话失败。")
+      : "本机 Codex 对话失败。";
+    throw new Error(message);
+  }
+  return parseChatResponse(payload);
 }
 
 async function generateWithLocalCodex(
@@ -550,6 +626,7 @@ function safeCompile(
 
 export default function Studio() {
   const [phase, setPhase] = useState<StudioPhase>("home");
+  const [capability, setCapability] = useState<ProjectKind>("web_app");
   const [prompt, setPrompt] = useState("");
   const [instruction, setInstruction] = useState("");
   const [projects, setProjects] = useState<ProjectItem[]>([]);
@@ -564,6 +641,7 @@ export default function Studio() {
   const [reasoningSummary, setReasoningSummary] = useState<string[]>([]);
   const [planProvider, setPlanProvider] = useState<string | null>(null);
   const [planModel, setPlanModel] = useState<string | null>(null);
+  const [planFeedback, setPlanFeedback] = useState("");
   const [planningLoading, setPlanningLoading] = useState(false);
   const [buildLog, setBuildLog] = useState<string[]>([]);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
@@ -578,6 +656,13 @@ export default function Studio() {
   const [sessionLoading, setSessionLoading] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
   const [logoutLoading, setLogoutLoading] = useState(false);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatSending, setChatSending] = useState(false);
+  const [chatMemory, setChatMemory] = useState<ChatMemory>({ enabled: false, content: "" });
+  const [memorySaving, setMemorySaving] = useState(false);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const accountSwitchingRef = useRef(false);
@@ -585,9 +670,19 @@ export default function Studio() {
   const identityEpochRef = useRef(0);
   const openProjectRequestRef = useRef(0);
   const planRequestRef = useRef(0);
+  const workspaceEpochRef = useRef(0);
+  const chatRequestRef = useRef(0);
+  const chatSendInFlightRef = useRef(false);
+  const chatCreateInFlightRef = useRef(false);
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const accountSwitching = loginLoading || logoutLoading;
+  const workspaceWriteBusy =
+    phase === "building"
+    || rollbackLoading
+    || chatSending
+    || Boolean(deletingProjectId)
+    || (phase === "home" && chatLoading);
 
   const activeVersion = useMemo(
     () => versions.find((version) => version.id === activeVersionId) ?? versions[0] ?? null,
@@ -695,10 +790,21 @@ export default function Studio() {
   }, []);
 
   const openProject = useCallback(async (project: ProjectItem) => {
+    if (
+      mutationInFlightRef.current
+      || chatSendInFlightRef.current
+      || chatCreateInFlightRef.current
+    ) {
+      showNotice("请等待当前写入完成后再切换项目", "error");
+      return;
+    }
     const identityEpoch = identityEpochRef.current;
     const requestId = openProjectRequestRef.current + 1;
     openProjectRequestRef.current = requestId;
     planRequestRef.current += 1;
+    workspaceEpochRef.current += 1;
+    chatRequestRef.current += 1;
+    chatSendInFlightRef.current = false;
     setActiveProject(project);
     setVersions([]);
     setActiveVersionId(null);
@@ -708,11 +814,55 @@ export default function Studio() {
     setReasoningSummary([]);
     setPlanProvider(null);
     setPlanModel(null);
+    setPlanFeedback("");
     setPlanningLoading(false);
     setBuildLog([]);
     setPhase("ready");
-    setVersionsLoading(true);
     setErrorMessage(null);
+    setChatMessages([]);
+    setChatInput("");
+    setChatSending(false);
+    setChatMemory({ enabled: false, content: "" });
+    setChatLoading(project.kind === "chat");
+    setVersionsLoading(project.kind === "web_app");
+    if (project.kind === "chat") {
+      try {
+        const payload = await requestJson(
+          `/api/projects/${encodeURIComponent(project.id)}/chat`,
+          { cache: "no-store" },
+        );
+        if (
+          identityEpoch !== identityEpochRef.current
+          || requestId !== openProjectRequestRef.current
+        ) return;
+        const row = isRecord(payload) ? payload : {};
+        const memory = isRecord(row.memory) ? row.memory : {};
+        setChatMemory({
+          enabled: memory.enabled === true,
+          content: readString(memory.content),
+        });
+        setChatMessages(
+          (Array.isArray(row.messages) ? row.messages : [])
+            .map(normalizeChatMessage)
+            .filter((item): item is ChatMessage => Boolean(item)),
+        );
+        setRetryAction(null);
+      } catch (error) {
+        if (
+          identityEpoch !== identityEpochRef.current
+          || requestId !== openProjectRequestRef.current
+        ) return;
+        setErrorMessage(getErrorMessage(error, "暂时无法读取对话记录。"));
+      } finally {
+        if (
+          identityEpoch === identityEpochRef.current
+          && requestId === openProjectRequestRef.current
+        ) {
+          setChatLoading(false);
+        }
+      }
+      return;
+    }
     setMessages([
       {
         id: makeId("message"),
@@ -756,11 +906,14 @@ export default function Studio() {
         setVersionsLoading(false);
       }
     }
-  }, []);
+  }, [showNotice]);
 
   const resetToHome = useCallback(() => {
     openProjectRequestRef.current += 1;
     planRequestRef.current += 1;
+    workspaceEpochRef.current += 1;
+    chatRequestRef.current += 1;
+    chatSendInFlightRef.current = false;
     setPhase("home");
     setVersionsLoading(false);
     setActiveProject(null);
@@ -772,22 +925,33 @@ export default function Studio() {
     setReasoningSummary([]);
     setPlanProvider(null);
     setPlanModel(null);
+    setPlanFeedback("");
     setPlanningLoading(false);
     setBuildLog([]);
     setMessages([]);
     setInstruction("");
+    setChatMessages([]);
+    setChatInput("");
+    setChatLoading(false);
+    setChatSending(false);
+    setChatMemory({ enabled: false, content: "" });
     setErrorMessage(null);
     setRetryAction(null);
   }, []);
 
-  const requestBuildPlan = useCallback(async (build: PendingBuild) => {
+  const requestBuildPlan = useCallback(async (
+    build: PendingBuild,
+    revision?: { currentPlan: BuildPlan; feedback: string },
+  ) => {
     const requestId = planRequestRef.current + 1;
     planRequestRef.current = requestId;
     setPlanningLoading(true);
-    setPlan(null);
-    setReasoningSummary([]);
-    setPlanProvider(null);
-    setPlanModel(null);
+    if (!revision) {
+      setPlan(null);
+      setReasoningSummary([]);
+      setPlanProvider(null);
+      setPlanModel(null);
+    }
     setErrorMessage(null);
     setRetryAction(null);
     setMessages((current) =>
@@ -813,6 +977,12 @@ export default function Studio() {
             ...(build.previousArtifact
               ? { previousArtifact: build.previousArtifact }
               : {}),
+            ...(revision
+              ? {
+                  currentPlan: revision.currentPlan,
+                  planFeedback: revision.feedback,
+                }
+              : {}),
           }),
         });
         planned = parsePlanResponse(payload);
@@ -824,7 +994,11 @@ export default function Studio() {
         if (!shouldUseLocalBridge) throw error;
 
         try {
-          planned = await planWithLocalCodex(build);
+          planned = await planWithLocalCodex(
+            build,
+            revision?.currentPlan,
+            revision?.feedback,
+          );
         } catch (bridgeError) {
           throw bridgeError;
         }
@@ -835,16 +1009,27 @@ export default function Studio() {
       setReasoningSummary(planned.reasoningSummary);
       setPlanProvider(planned.provider);
       setPlanModel(planned.model);
+      setPlanFeedback("");
       setMessages((current) =>
-        current.map((message) =>
-          message.meta === "正在规划"
-            ? {
-                ...message,
-                text: "模型已经完成需求分析。请检查下面的 BuildPlan，确认后才会开始生成代码。",
+        revision
+          ? [
+              ...current,
+              {
+                id: makeId("message"),
+                role: "agent",
+                text: "已经根据你的反馈调整 BuildPlan。你可以继续修改，或确认后开始构建。",
                 meta: `${providerLabel(planned.provider)} · 等待确认`,
-              }
-            : message,
-        ),
+              },
+            ]
+          : current.map((message) =>
+              message.meta === "正在规划"
+                ? {
+                    ...message,
+                    text: "模型已经完成需求分析。请检查下面的 BuildPlan，确认后才会开始生成代码。",
+                    meta: `${providerLabel(planned.provider)} · 等待确认`,
+                  }
+                : message,
+            ),
       );
     } catch (error) {
       if (requestId !== planRequestRef.current) return;
@@ -875,6 +1060,7 @@ export default function Studio() {
       prompt: cleanPrompt,
     };
     setPendingBuild(build);
+    setPlanFeedback("");
     setMessages([
       { id: makeId("message"), role: "user", text: cleanPrompt },
       {
@@ -909,6 +1095,7 @@ export default function Studio() {
       previousArtifact: activeVersion.artifact,
     };
     setPendingBuild(build);
+    setPlanFeedback("");
     setMessages((current) => [
       ...current,
       { id: makeId("message"), role: "user", text: cleanInstruction },
@@ -924,6 +1111,20 @@ export default function Studio() {
     setPhase("planning");
     void requestBuildPlan(build);
   }, [activeProject, activeVersion, instruction, requestBuildPlan]);
+
+  const adjustBuildPlan = useCallback(() => {
+    if (!pendingBuild || !plan || planningLoading) return;
+    const feedback = planFeedback.trim();
+    if (feedback.length < 2) {
+      setErrorMessage("请说明希望怎样调整当前方案。");
+      return;
+    }
+    setMessages((current) => [
+      ...current,
+      { id: makeId("message"), role: "user", text: feedback, meta: "调整 BuildPlan" },
+    ]);
+    void requestBuildPlan(pendingBuild, { currentPlan: plan, feedback });
+  }, [pendingBuild, plan, planFeedback, planningLoading, requestBuildPlan]);
 
   const persistVersion = useCallback(
     async (
@@ -994,6 +1195,8 @@ export default function Studio() {
     }
     if (mutationInFlightRef.current) return;
     mutationInFlightRef.current = true;
+    const workspaceEpoch = workspaceEpochRef.current;
+    const isCurrentWorkspace = () => workspaceEpoch === workspaceEpochRef.current;
     const build = pendingBuild;
     const confirmedPlan = plan;
     const confirmedReasoningSummary = reasoningSummary;
@@ -1050,10 +1253,12 @@ export default function Studio() {
           && error.code === "OPENAI_NOT_CONFIGURED";
         if (!shouldUseLocalBridge) throw error;
 
-        setBuildLog((current) => [
-          ...current,
-          "线上未配置 API Key，正在请求本机 Codex",
-        ]);
+        if (isCurrentWorkspace()) {
+          setBuildLog((current) => [
+            ...current,
+            "线上未配置 API Key，正在请求本机 Codex",
+          ]);
+        }
         try {
           generated = await generateWithLocalCodex(build, confirmedPlan);
         } catch (bridgeError) {
@@ -1061,14 +1266,18 @@ export default function Studio() {
         }
       }
 
-      setBuildLog((current) => [
-        ...current,
-        `${providerLabel(generated.provider)} 已返回可运行 Web App`,
-      ]);
+      if (isCurrentWorkspace()) {
+        setBuildLog((current) => [
+          ...current,
+          `${providerLabel(generated.provider)} 已返回可运行 Web App`,
+        ]);
+      }
 
       let project = activeProject;
       if (build.kind === "new") {
-        setBuildLog((current) => [...current, "正在创建项目"]);
+        if (isCurrentWorkspace()) {
+          setBuildLog((current) => [...current, "正在创建项目"]);
+        }
         const projectPayload = await requestJson("/api/projects", {
           method: "POST",
           body: JSON.stringify({
@@ -1081,7 +1290,9 @@ export default function Studio() {
       }
       if (!project) throw new Error("找不到要更新的项目，请返回首页重试。 ");
 
-      setBuildLog((current) => [...current, "正在保存应用版本"]);
+      if (isCurrentWorkspace()) {
+        setBuildLog((current) => [...current, "正在保存应用版本"]);
+      }
       const version = await persistVersion(
         project,
         generated,
@@ -1089,41 +1300,45 @@ export default function Studio() {
         confirmedPlan,
         confirmedReasoningSummary,
       );
-      const nextVersions = sortVersions([
-        version,
-        ...versions.filter((item) => item.id !== version.id),
-      ]);
-      setActiveProject(project);
-      setVersions(nextVersions);
-      setActiveVersionId(version.id);
-      setRecords([]);
-      setInstruction("");
-      setPendingBuild(null);
-      setPlan(null);
-      setReasoningSummary([]);
-      setPlanProvider(null);
-      setPlanModel(null);
-      setMessages((current) => [
-        ...current.filter((message) => !message.meta?.includes("等待确认")),
-        {
-          id: makeId("message"),
-          role: "agent",
-          text:
-            build.kind === "new"
-              ? `「${project.name}」已经生成。右侧是本次生成的完整 Web App，可以直接操作。`
-              : `调整完成，已保存为 v${version.ordinal}。旧版本仍在左侧，可以随时查看或恢复。`,
-          meta: `${providerLabel(generated.provider)} 生成`,
-        },
-      ]);
-      setPhase("ready");
-      setRetryAction(null);
-      if (generated.warning) showNotice(generated.warning);
-      else showNotice(build.kind === "new" ? "应用已准备好" : `已创建 v${version.ordinal}`);
+      if (isCurrentWorkspace()) {
+        const nextVersions = sortVersions([
+          version,
+          ...versions.filter((item) => item.id !== version.id),
+        ]);
+        setActiveProject(project);
+        setVersions(nextVersions);
+        setActiveVersionId(version.id);
+        setRecords([]);
+        setInstruction("");
+        setPendingBuild(null);
+        setPlan(null);
+        setReasoningSummary([]);
+        setPlanProvider(null);
+        setPlanModel(null);
+        setMessages((current) => [
+          ...current.filter((message) => !message.meta?.includes("等待确认")),
+          {
+            id: makeId("message"),
+            role: "agent",
+            text:
+              build.kind === "new"
+                ? `「${project.name}」已经生成。右侧是本次生成的完整 Web App，可以直接操作。`
+                : `调整完成，已保存为 v${version.ordinal}。旧版本仍在左侧，可以随时查看或恢复。`,
+            meta: `${providerLabel(generated.provider)} 生成`,
+          },
+        ]);
+        setPhase("ready");
+        setRetryAction(null);
+        if (generated.warning) showNotice(generated.warning);
+        else showNotice(build.kind === "new" ? "应用已准备好" : `已创建 v${version.ordinal}`);
+      }
       void loadProjects(true);
     } catch (error) {
-      setErrorMessage(getErrorMessage(error, "生成过程中出现问题，请重试。"));
-      setRetryAction("build");
-      setPhase("planning");
+      if (isCurrentWorkspace()) {
+        setErrorMessage(getErrorMessage(error, "生成过程中出现问题，请重试。"));
+        setRetryAction("build");
+        setPhase("planning");
+      }
     } finally {
       mutationInFlightRef.current = false;
     }
@@ -1157,6 +1372,8 @@ export default function Studio() {
     }
     if (mutationInFlightRef.current) return;
     mutationInFlightRef.current = true;
+    const workspaceEpoch = workspaceEpochRef.current;
+    const isCurrentWorkspace = () => workspaceEpoch === workspaceEpochRef.current;
     setRollbackLoading(true);
     setErrorMessage(null);
     setRetryAction(null);
@@ -1202,26 +1419,30 @@ export default function Studio() {
           records: [],
           createdAt: new Date().toISOString(),
           };
-      setVersions((current) => sortVersions([restored, ...current]));
-      setActiveVersionId(restored.id);
-      setRecords([]);
-      setMessages((current) => [
-        ...current,
-        {
-          id: makeId("message"),
-          role: "agent",
-          text: `已把 v${activeVersion.ordinal} 恢复为新的 v${restored.ordinal}，原有版本没有被覆盖。`,
-          meta: "版本恢复",
-        },
-      ]);
-      showNotice(`已恢复为 v${restored.ordinal}`);
+      if (isCurrentWorkspace()) {
+        setVersions((current) => sortVersions([restored, ...current]));
+        setActiveVersionId(restored.id);
+        setRecords([]);
+        setMessages((current) => [
+          ...current,
+          {
+            id: makeId("message"),
+            role: "agent",
+            text: `已把 v${activeVersion.ordinal} 恢复为新的 v${restored.ordinal}，原有版本没有被覆盖。`,
+            meta: "版本恢复",
+          },
+        ]);
+        showNotice(`已恢复为 v${restored.ordinal}`);
+      }
       void loadProjects(true);
     } catch (error) {
-      setErrorMessage(getErrorMessage(error, "暂时无法恢复这个版本。"));
-      setRetryAction("rollback");
+      if (isCurrentWorkspace()) {
+        setErrorMessage(getErrorMessage(error, "暂时无法恢复这个版本。"));
+        setRetryAction("rollback");
+      }
     } finally {
       mutationInFlightRef.current = false;
-      setRollbackLoading(false);
+      if (isCurrentWorkspace()) setRollbackLoading(false);
     }
   }, [
     activeProject,
@@ -1232,9 +1453,222 @@ export default function Studio() {
     showNotice,
   ]);
 
+  const sendChatMessage = useCallback(async (options?: {
+    project?: ProjectItem;
+    text?: string;
+    history?: ChatMessage[];
+    memory?: ChatMemory;
+    allowWhileLoading?: boolean;
+  }) => {
+    const project = options?.project ?? activeProject;
+    const text = (options?.text ?? chatInput).trim();
+    const history = options?.history ?? chatMessages;
+    const memory = options?.memory ?? chatMemory;
+    if (
+      !project
+      || project.kind !== "chat"
+      || !text
+      || chatSending
+      || Boolean(deletingProjectId)
+      || chatSendInFlightRef.current
+      || (chatLoading && !options?.allowWhileLoading)
+    ) return;
+
+    const workspaceEpoch = workspaceEpochRef.current;
+    const requestId = chatRequestRef.current + 1;
+    chatRequestRef.current = requestId;
+    chatSendInFlightRef.current = true;
+    const isCurrentChat = () =>
+      workspaceEpoch === workspaceEpochRef.current
+      && requestId === chatRequestRef.current;
+
+    const userMessage: ChatMessage = {
+      id: makeId("chat-user"),
+      role: "user",
+      content: text,
+      provider: null,
+      model: null,
+      createdAt: new Date().toISOString(),
+    };
+    setChatMessages([...history, userMessage]);
+    setChatInput("");
+    setChatSending(true);
+    setErrorMessage(null);
+
+    try {
+      const requestBody = {
+        message: text,
+        history: history
+          .slice(-40)
+          .map((item) => ({ role: item.role, content: item.content })),
+        memory: memory.enabled ? memory.content : "",
+      };
+      let result: ChatResponse;
+      try {
+        result = parseChatResponse(await requestJson("/api/chat", {
+          method: "POST",
+          body: JSON.stringify(requestBody),
+        }));
+      } catch (error) {
+        const shouldUseLocalBridge =
+          error instanceof ResponseError
+          && error.status === 503
+          && error.code === "OPENAI_NOT_CONFIGURED";
+        if (!shouldUseLocalBridge) throw error;
+        result = await chatWithLocalCodex(requestBody);
+      }
+
+      const assistantMessage: ChatMessage = {
+        id: makeId("chat-assistant"),
+        role: "assistant",
+        content: result.reply,
+        provider: result.provider,
+        model: result.model,
+        createdAt: new Date().toISOString(),
+      };
+      if (isCurrentChat()) {
+        setChatMessages((current) => [...current, assistantMessage]);
+      }
+
+      await requestJson(`/api/projects/${encodeURIComponent(project.id)}/chat`, {
+        method: "POST",
+        body: JSON.stringify({
+          userMessage: text,
+          assistantMessage: result.reply,
+          provider: result.provider,
+          model: result.model,
+        }),
+      });
+      void loadProjects(true);
+    } catch (error) {
+      if (isCurrentChat()) {
+        setChatMessages(history);
+        setChatInput(text);
+        setErrorMessage(getErrorMessage(error, "对话没有完成，请重试。"));
+      }
+    } finally {
+      if (requestId === chatRequestRef.current) {
+        chatSendInFlightRef.current = false;
+        if (isCurrentChat()) setChatSending(false);
+      }
+    }
+  }, [
+    activeProject,
+    chatInput,
+    chatLoading,
+    chatMemory,
+    chatMessages,
+    chatSending,
+    deletingProjectId,
+    loadProjects,
+  ]);
+
+  const beginNewChat = useCallback(async () => {
+    const cleanPrompt = prompt.trim();
+    if (
+      cleanPrompt.length < 2
+      || accountSwitchingRef.current
+      || chatCreateInFlightRef.current
+    ) {
+      setErrorMessage("请输入你想和 Agent 讨论的问题。");
+      return;
+    }
+    chatCreateInFlightRef.current = true;
+    setErrorMessage(null);
+    setChatLoading(true);
+    try {
+      const payload = await requestJson("/api/projects", {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "chat",
+          title: deriveProjectName(cleanPrompt),
+          name: deriveProjectName(cleanPrompt),
+          prompt: cleanPrompt,
+        }),
+      });
+      const normalized = normalizeProject(payload);
+      if (!normalized) throw new Error("创建对话项目失败，请重试。");
+      const project: ProjectItem = { ...normalized, kind: "chat" };
+      workspaceEpochRef.current += 1;
+      chatRequestRef.current += 1;
+      setActiveProject(project);
+      setProjects((current) => [project, ...current.filter((item) => item.id !== project.id)]);
+      setVersions([]);
+      setActiveVersionId(null);
+      setPhase("ready");
+      setChatMessages([]);
+      setChatMemory({ enabled: true, content: "" });
+      setPrompt("");
+      await sendChatMessage({
+        project,
+        text: cleanPrompt,
+        history: [],
+        memory: { enabled: true, content: "" },
+        allowWhileLoading: true,
+      });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error, "创建对话项目失败，请重试。"));
+    } finally {
+      chatCreateInFlightRef.current = false;
+      setChatLoading(false);
+    }
+  }, [prompt, sendChatMessage]);
+
+  const saveChatMemory = useCallback(async () => {
+    if (!activeProject || activeProject.kind !== "chat") return;
+    setMemorySaving(true);
+    setErrorMessage(null);
+    try {
+      await requestJson(`/api/projects/${encodeURIComponent(activeProject.id)}/chat`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          memoryEnabled: chatMemory.enabled,
+          memoryContent: chatMemory.content,
+        }),
+      });
+      showNotice("长期记忆配置已保存");
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error, "长期记忆保存失败，请重试。"));
+    } finally {
+      setMemorySaving(false);
+    }
+  }, [activeProject, chatMemory, showNotice]);
+
+  const deleteProject = useCallback(async (project: ProjectItem) => {
+    if (deletingProjectId || accountSwitchingRef.current) return;
+    if (
+      mutationInFlightRef.current
+      || chatSendInFlightRef.current
+      || chatCreateInFlightRef.current
+    ) {
+      showNotice("请等待当前写入完成后再删除项目", "error");
+      return;
+    }
+    if (!window.confirm(`确定删除「${project.name}」吗？此操作无法撤销。`)) return;
+    setDeletingProjectId(project.id);
+    setErrorMessage(null);
+    try {
+      await requestJson(`/api/projects/${encodeURIComponent(project.id)}`, {
+        method: "DELETE",
+      });
+      setProjects((current) => current.filter((item) => item.id !== project.id));
+      if (activeProject?.id === project.id) resetToHome();
+      showNotice(`已删除「${project.name}」`);
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error, "删除项目失败，请重试。"));
+    } finally {
+      setDeletingProjectId(null);
+    }
+  }, [activeProject, deletingProjectId, resetToHome, showNotice]);
+
   const beginLogin = useCallback(async () => {
     if (accountSwitchingRef.current) return;
-    if (phase === "building" || mutationInFlightRef.current) {
+    if (
+      phase === "building"
+      || mutationInFlightRef.current
+      || chatSendInFlightRef.current
+      || chatCreateInFlightRef.current
+    ) {
       showNotice("请等待当前写入完成后再登录", "error");
       return;
     }
@@ -1249,7 +1683,12 @@ export default function Studio() {
 
   const handleLogout = useCallback(async () => {
     if (accountSwitchingRef.current) return;
-    if (phase === "building" || mutationInFlightRef.current) {
+    if (
+      phase === "building"
+      || mutationInFlightRef.current
+      || chatSendInFlightRef.current
+      || chatCreateInFlightRef.current
+    ) {
       showNotice("请等待当前写入完成后再退出", "error");
       return;
     }
@@ -1329,7 +1768,13 @@ export default function Studio() {
   const handleRetry = useCallback(() => {
     if (retryAction === "projects") void loadProjects();
     if (retryAction === "versions" && activeProject) void openProject(activeProject);
-    if (retryAction === "plan" && pendingBuild) void requestBuildPlan(pendingBuild);
+    if (retryAction === "plan" && pendingBuild) {
+      const feedback = planFeedback.trim();
+      void requestBuildPlan(
+        pendingBuild,
+        plan && feedback ? { currentPlan: plan, feedback } : undefined,
+      );
+    }
     if (retryAction === "build") void executeBuild();
     if (retryAction === "rollback") void rollbackVersion();
   }, [
@@ -1338,6 +1783,8 @@ export default function Studio() {
     loadProjects,
     openProject,
     pendingBuild,
+    plan,
+    planFeedback,
     requestBuildPlan,
     retryAction,
     rollbackVersion,
@@ -1346,7 +1793,8 @@ export default function Studio() {
   const handlePromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       event.preventDefault();
-      beginNewPlan();
+      if (capability === "chat") void beginNewChat();
+      else beginNewPlan();
     }
   };
 
@@ -1356,7 +1804,8 @@ export default function Studio() {
 
   const submitNewProject = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    beginNewPlan();
+    if (capability === "chat") void beginNewChat();
+    else beginNewPlan();
   };
 
   const submitRefinement = (event: FormEvent<HTMLFormElement>) => {
@@ -1373,6 +1822,7 @@ export default function Studio() {
     setReasoningSummary([]);
     setPlanProvider(null);
     setPlanModel(null);
+    setPlanFeedback("");
     setPlanningLoading(false);
     setMessages((current) =>
       current.filter(
@@ -1419,42 +1869,73 @@ export default function Studio() {
             从一句话到可运行工具
           </div>
           <h1 id="forge-title">
-            把脑海里的工具，
-            <span>现在就造出来。</span>
+            构建应用，也可以
+            <span>直接开始对话。</span>
           </h1>
           <p className="forge-hero__lead">
-            描述你想做的应用。Forge 会先用模型生成 BuildPlan，确认后再构建可直接运行的 Web App。
+            选择 Web App 构建或长期对话。Web App 会先生成可反复调整的 BuildPlan，两种能力都作为独立项目保存和管理。
           </p>
+
+          <div className="capability-switch" role="tablist" aria-label="选择 Agent 能力">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={capability === "web_app"}
+              className={capability === "web_app" ? "is-active" : ""}
+              onClick={() => setCapability("web_app")}
+              disabled={accountSwitching || workspaceWriteBusy}
+            >
+              <span aria-hidden="true">◇</span>
+              <strong>构建 Web App</strong>
+              <small>先调整方案，再生成可运行网页</small>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={capability === "chat"}
+              className={capability === "chat" ? "is-active" : ""}
+              onClick={() => setCapability("chat")}
+              disabled={accountSwitching || workspaceWriteBusy}
+            >
+              <span aria-hidden="true">✦</span>
+              <strong>开始对话</strong>
+              <small>连续交流，并可配置长期记忆</small>
+            </button>
+          </div>
 
           <form className="prompt-composer" onSubmit={submitNewProject}>
             <label className="sr-only" htmlFor="forge-prompt">
-              描述你想创建的应用
+              {capability === "web_app" ? "描述你想创建的应用" : "输入第一条对话消息"}
             </label>
             <textarea
               id="forge-prompt"
               value={prompt}
               onChange={(event) => handlePromptChange(event.target.value)}
               onKeyDown={handlePromptKeyDown}
-              placeholder="例如：做一个支持键盘和触屏操作的霓虹贪吃蛇……"
+              placeholder={
+                capability === "web_app"
+                  ? "例如：做一个支持键盘和触屏操作的霓虹贪吃蛇……"
+                  : "例如：帮我制定接下来一个月的面试准备计划……"
+              }
               rows={4}
               maxLength={1200}
               autoFocus
-              disabled={accountSwitching}
+              disabled={accountSwitching || workspaceWriteBusy}
             />
             <div className="model-route" aria-label="生成能力">
-              <span><i aria-hidden="true" /> Web App</span>
+              <span><i aria-hidden="true" /> {capability === "web_app" ? "Web App" : "对话 Agent"}</span>
               <small>优先线上 OpenAI · 未配置时使用本机 Codex</small>
             </div>
             <div className="prompt-composer__footer">
               <span className="prompt-composer__hint">
-                <kbd>⌘</kbd><kbd>↵</kbd> 提交 · 先规划，确认后再生成代码
+                <kbd>⌘</kbd><kbd>↵</kbd> 提交 · {capability === "web_app" ? "先规划，再确认构建" : "创建项目并发送消息"}
               </span>
               <button
                 className="forge-button forge-button--primary"
                 type="submit"
-                disabled={accountSwitching}
+                disabled={accountSwitching || workspaceWriteBusy}
               >
-                <span>生成计划</span>
+                <span>{capability === "web_app" ? "生成计划" : "开始对话"}</span>
                 <span aria-hidden="true">→</span>
               </button>
             </div>
@@ -1468,6 +1949,7 @@ export default function Studio() {
           ) : null}
         </section>
 
+        {capability === "web_app" ? (
         <section className="forge-starters" aria-labelledby="starters-title">
           <div className="section-heading">
             <div>
@@ -1500,6 +1982,20 @@ export default function Studio() {
             ))}
           </div>
         </section>
+        ) : (
+          <section className="chat-intro" aria-label="对话能力说明">
+            <div>
+              <span className="section-heading__kicker">LONG-RUNNING CONVERSATION</span>
+              <h2>让每段对话保留自己的上下文</h2>
+              <p>创建后可以连续追问，并在工作区里配置这个对话专属的长期记忆。</p>
+            </div>
+            <ol>
+              <li><span>01</span>创建独立对话项目</li>
+              <li><span>02</span>按需写入长期记忆</li>
+              <li><span>03</span>下次打开继续交流</li>
+            </ol>
+          </section>
+        )}
 
         <section className="recent-projects" aria-labelledby="recent-title">
           <div className="section-heading section-heading--inline">
@@ -1554,24 +2050,41 @@ export default function Studio() {
           ) : projects.length ? (
             <div className="recent-grid">
               {projects.slice(0, 6).map((project, index) => (
-                <button
+                <article
                   className="project-card"
-                  type="button"
                   key={project.id}
-                  onClick={() => void openProject(project)}
                 >
-                  <span className={`project-card__icon project-card__icon--${(index % 3) + 1}`}>
-                    {project.name.slice(0, 1).toUpperCase()}
-                  </span>
-                  <span className="project-card__content">
-                    <strong>{project.name}</strong>
-                    <span>{project.prompt || "打开并继续完善这个应用"}</span>
-                  </span>
-                  <span className="project-card__meta">
-                    {formatRelativeDate(project.updatedAt ?? project.createdAt)}
-                    <span aria-hidden="true">→</span>
-                  </span>
-                </button>
+                  <button
+                    className="project-card__open"
+                    type="button"
+                    onClick={() => void openProject(project)}
+                    disabled={accountSwitching || workspaceWriteBusy}
+                  >
+                    <span className={`project-card__icon project-card__icon--${(index % 3) + 1}`}>
+                      {project.kind === "chat" ? "✦" : project.name.slice(0, 1).toUpperCase()}
+                    </span>
+                    <span className="project-card__content">
+                      <span className="project-card__kind">
+                        {project.kind === "chat" ? "对话" : "Web App"}
+                      </span>
+                      <strong>{project.name}</strong>
+                      <span>{project.prompt || (project.kind === "chat" ? "继续这段对话" : "打开并继续完善这个应用")}</span>
+                    </span>
+                    <span className="project-card__meta">
+                      {formatRelativeDate(project.updatedAt ?? project.createdAt)}
+                      <span aria-hidden="true">→</span>
+                    </span>
+                  </button>
+                  <button
+                    className="project-card__delete"
+                    type="button"
+                    onClick={() => void deleteProject(project)}
+                    disabled={accountSwitching || workspaceWriteBusy}
+                    aria-label={`删除项目 ${project.name}`}
+                  >
+                    {deletingProjectId === project.id ? "…" : "删除"}
+                  </button>
+                </article>
               ))}
             </div>
           ) : (
@@ -1596,6 +2109,199 @@ export default function Studio() {
 
   const workspaceName = activeProject?.name ?? deriveProjectName(pendingBuild?.prompt ?? prompt);
 
+  if (activeProject?.kind === "chat") {
+    return (
+      <main className="studio-shell chat-shell">
+        <header className="studio-topbar">
+          <button
+            className="forge-brand forge-brand--button"
+            type="button"
+            onClick={resetToHome}
+            disabled={accountSwitching || workspaceWriteBusy}
+          >
+            <span className="forge-brand__mark" aria-hidden="true"><span /><span /><span /></span>
+            <span className="forge-brand__word">Forge</span>
+          </button>
+          <span className="studio-topbar__divider" aria-hidden="true">/</span>
+          <div className="studio-topbar__project">
+            <strong>{workspaceName}</strong>
+            <span>对话项目</span>
+          </div>
+          <div className="studio-topbar__actions">
+            <span className="save-indicator save-indicator--saved">
+              <span className="status-dot" aria-hidden="true" />
+              {user ? "云端已同步" : "访客工作区"}
+            </span>
+            <button
+              className="chat-delete-project"
+              type="button"
+              onClick={() => void deleteProject(activeProject)}
+              disabled={accountSwitching || workspaceWriteBusy}
+            >
+              {deletingProjectId === activeProject.id ? "删除中…" : "删除项目"}
+            </button>
+            <AccountControl
+              user={user}
+              loading={sessionLoading}
+              loginLoading={loginLoading}
+              logoutLoading={logoutLoading}
+              onLogin={() => void beginLogin()}
+              onLogout={() => void handleLogout()}
+              compact
+            />
+            <button className="icon-button" type="button" onClick={resetToHome} aria-label="新建项目" disabled={accountSwitching || workspaceWriteBusy}>＋</button>
+          </div>
+        </header>
+
+        <div className="chat-layout">
+          <aside className="studio-sidebar" aria-label="项目列表">
+            <div className="sidebar-section sidebar-section--versions">
+              <div className="sidebar-section__heading">
+                <span>全部项目</span>
+                <button type="button" onClick={resetToHome} aria-label="创建新项目" disabled={accountSwitching || workspaceWriteBusy}>＋</button>
+              </div>
+              <div className="sidebar-projects">
+                {projects.map((project) => (
+                  <div className={`sidebar-project-row${project.id === activeProject.id ? " is-active" : ""}`} key={project.id}>
+                    <button
+                      className="sidebar-project-row__open"
+                      type="button"
+                      onClick={() => void openProject(project)}
+                      disabled={accountSwitching || workspaceWriteBusy}
+                    >
+                      <span className="sidebar-projects__mark" aria-hidden="true">
+                        {project.kind === "chat" ? "✦" : project.name.slice(0, 1).toUpperCase()}
+                      </span>
+                      <span>{project.name}</span>
+                      <small>{project.kind === "chat" ? "对话" : "Web"}</small>
+                    </button>
+                    <button
+                      className="sidebar-project-row__delete"
+                      type="button"
+                      onClick={() => void deleteProject(project)}
+                      disabled={accountSwitching || workspaceWriteBusy}
+                      aria-label={`删除项目 ${project.name}`}
+                    >×</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="sidebar-footer"><span className="status-dot status-dot--live" aria-hidden="true" /> Chat ready</div>
+          </aside>
+
+          <section className="chat-workspace" aria-labelledby="chat-title">
+            <header className="chat-workspace__header">
+              <div>
+                <span className="agent-avatar" aria-hidden="true">✦</span>
+                <div><strong id="chat-title">Forge Agent</strong><span>连续对话</span></div>
+              </div>
+              <span className="agent-status"><i aria-hidden="true" /> 在线</span>
+            </header>
+
+            <div className="chat-thread" aria-live="polite">
+              {errorMessage ? <ErrorBanner message={errorMessage} /> : null}
+              {chatLoading ? (
+                <div className="chat-empty" role="status"><span>✦</span><strong>正在读取对话…</strong></div>
+              ) : chatMessages.length ? (
+                chatMessages.map((message) => (
+                  <article className={`chat-message chat-message--${message.role}`} key={message.id}>
+                    <span className="chat-message__avatar" aria-hidden="true">
+                      {message.role === "assistant" ? "✦" : "你"}
+                    </span>
+                    <div>
+                      <strong>{message.role === "assistant" ? "Forge Agent" : "你"}</strong>
+                      <p>{message.content}</p>
+                      {message.role === "assistant" && message.provider ? (
+                        <small>{providerLabel(message.provider)}{message.model ? ` · ${message.model}` : ""}</small>
+                      ) : null}
+                    </div>
+                  </article>
+                ))
+              ) : (
+                <div className="chat-empty"><span>✦</span><strong>开始这段对话</strong><p>输入消息，模型会结合当前记录和已启用的长期记忆回复。</p></div>
+              )}
+              {chatSending ? (
+                <article className="chat-message chat-message--assistant chat-message--typing">
+                  <span className="chat-message__avatar" aria-hidden="true">✦</span>
+                  <div><strong>Forge Agent</strong><p>正在思考并回复…</p></div>
+                </article>
+              ) : null}
+            </div>
+
+            <form
+              className="chat-composer"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void sendChatMessage();
+              }}
+            >
+              <label className="sr-only" htmlFor="chat-input">发送消息</label>
+              <textarea
+                id="chat-input"
+                value={chatInput}
+                onChange={(event) => setChatInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void sendChatMessage();
+                  }
+                }}
+                placeholder="输入消息，Enter 发送，Shift + Enter 换行…"
+                rows={3}
+                maxLength={4000}
+                disabled={chatLoading || chatSending || Boolean(deletingProjectId) || accountSwitching}
+              />
+              <div>
+                <span>当前上下文 {chatMessages.length} 条</span>
+                <button type="submit" disabled={!chatInput.trim() || chatLoading || chatSending || Boolean(deletingProjectId) || accountSwitching}>
+                  {chatSending ? "回复中…" : "发送"} <span aria-hidden="true">↑</span>
+                </button>
+              </div>
+            </form>
+          </section>
+
+          <aside className="memory-panel" aria-labelledby="memory-title">
+            <header>
+              <span className="section-heading__kicker">CONVERSATION MEMORY</span>
+              <h2 id="memory-title">长期记忆</h2>
+              <p>记录希望 Agent 在这个对话中持续参考的信息。</p>
+            </header>
+            <label className="memory-toggle">
+              <input
+                type="checkbox"
+                checked={chatMemory.enabled}
+                onChange={(event) => setChatMemory((current) => ({ ...current, enabled: event.target.checked }))}
+              />
+              <span aria-hidden="true"><i /></span>
+              <strong>在回复中启用</strong>
+            </label>
+            <label className="memory-editor">
+              <span>记忆内容</span>
+              <textarea
+                value={chatMemory.content}
+                onChange={(event) => setChatMemory((current) => ({ ...current, content: event.target.value }))}
+                placeholder="例如：我的目标、偏好、项目背景，以及希望 Agent 长期遵循的约定……"
+                rows={12}
+                maxLength={6000}
+              />
+              <small>{chatMemory.content.length} / 6000</small>
+            </label>
+            <button
+              className="forge-button forge-button--primary memory-save"
+              type="button"
+              onClick={() => void saveChatMemory()}
+              disabled={memorySaving}
+            >
+              {memorySaving ? "保存中…" : "保存记忆配置"}
+            </button>
+            <p className="memory-note">记忆按对话项目分别保存，只在启用后随新消息发送给模型。</p>
+          </aside>
+        </div>
+        <NoticeToast notice={notice} />
+      </main>
+    );
+  }
+
   return (
     <main className="studio-shell">
       <header className="studio-topbar">
@@ -1603,7 +2309,7 @@ export default function Studio() {
           className="forge-brand forge-brand--button"
           type="button"
           onClick={resetToHome}
-          disabled={accountSwitching}
+          disabled={accountSwitching || workspaceWriteBusy}
         >
           <span className="forge-brand__mark" aria-hidden="true">
             <span />
@@ -1650,7 +2356,7 @@ export default function Studio() {
             type="button"
             onClick={resetToHome}
             aria-label="新建应用"
-            disabled={accountSwitching}
+            disabled={accountSwitching || workspaceWriteBusy}
           >
             <span aria-hidden="true">＋</span>
           </button>
@@ -1666,25 +2372,36 @@ export default function Studio() {
                 type="button"
                 onClick={resetToHome}
                 aria-label="创建新项目"
-                disabled={accountSwitching}
+                disabled={accountSwitching || workspaceWriteBusy}
               >＋</button>
             </div>
             <div className="sidebar-projects">
               {projects.map((project) => (
-                <button
-                  className={project.id === activeProject?.id ? "is-active" : ""}
-                  type="button"
+                <div
+                  className={`sidebar-project-row${project.id === activeProject?.id ? " is-active" : ""}`}
                   key={project.id}
-                  onClick={() => void openProject(project)}
-                  aria-current={project.id === activeProject?.id ? "page" : undefined}
-                  disabled={accountSwitching}
                 >
-                  <span className="sidebar-projects__mark" aria-hidden="true">
-                    {project.name.slice(0, 1).toUpperCase()}
-                  </span>
-                  <span>{project.name}</span>
-                  {project.id === activeProject?.id ? <i aria-hidden="true" /> : null}
-                </button>
+                  <button
+                    className="sidebar-project-row__open"
+                    type="button"
+                    onClick={() => void openProject(project)}
+                    aria-current={project.id === activeProject?.id ? "page" : undefined}
+                    disabled={accountSwitching || workspaceWriteBusy}
+                  >
+                    <span className="sidebar-projects__mark" aria-hidden="true">
+                      {project.kind === "chat" ? "✦" : project.name.slice(0, 1).toUpperCase()}
+                    </span>
+                    <span>{project.name}</span>
+                    <small>{project.kind === "chat" ? "对话" : "Web"}</small>
+                  </button>
+                  <button
+                    className="sidebar-project-row__delete"
+                    type="button"
+                    onClick={() => void deleteProject(project)}
+                    disabled={accountSwitching || workspaceWriteBusy}
+                    aria-label={`删除项目 ${project.name}`}
+                  >×</button>
+                </div>
               ))}
               {!activeProject && pendingBuild ? (
                 <div className="sidebar-projects__draft">
@@ -1714,7 +2431,7 @@ export default function Studio() {
                     key={version.id}
                     onClick={() => chooseVersion(version)}
                     aria-current={version.id === activeVersion?.id ? "true" : undefined}
-                    disabled={accountSwitching}
+                    disabled={accountSwitching || workspaceWriteBusy}
                   >
                     <span className="version-list__rail" aria-hidden="true">
                       <i />
@@ -1901,6 +2618,32 @@ export default function Studio() {
                         : "生成的完整网页会保存为项目版本，并支持继续调整和导出。"}
                     </p>
                   </div>
+                  <div className="plan-feedback">
+                    <label htmlFor="plan-feedback-input">
+                      <strong>继续调整当前方案</strong>
+                      <span>告诉 Agent 要增加、删除或修改什么，它会基于当前 BuildPlan 继续优化。</span>
+                    </label>
+                    <div>
+                      <textarea
+                        id="plan-feedback-input"
+                        value={planFeedback}
+                        onChange={(event) => setPlanFeedback(event.target.value)}
+                        placeholder="例如：不要使用 Canvas，改成 DOM 网格；再增加移动端触控方案……"
+                        rows={3}
+                        maxLength={1000}
+                        disabled={planningLoading || accountSwitching}
+                      />
+                      <button
+                        className="forge-button forge-button--secondary"
+                        type="button"
+                        onClick={adjustBuildPlan}
+                        disabled={!planFeedback.trim() || planningLoading || accountSwitching}
+                      >
+                        <span aria-hidden="true">↻</span>
+                        调整方案
+                      </button>
+                    </div>
+                  </div>
                   <div className="build-plan__actions">
                     <button
                       className="forge-button forge-button--ghost"
@@ -2027,7 +2770,7 @@ export default function Studio() {
                   key={tab}
                   onClick={() => setInspectorTab(tab)}
                 >
-                  {tab === "preview" ? "Preview" : tab === "code" ? "Code" : "Spec"}
+                  {tab === "preview" ? "预览" : tab === "code" ? "代码" : "生成详情"}
                 </button>
               ))}
             </div>
