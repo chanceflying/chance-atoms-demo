@@ -3277,11 +3277,18 @@ export default function Studio({
               ) : null}
               {versions.map((version, index) => {
                 const isSelectedVersion = version.id === activeVersion?.id;
-                const isBuildLocked = phase === "building" && !isSelectedVersion;
+                const versionSwitchLockMessage = phase === "building"
+                  ? "当前版本构建中，请完成后再切换"
+                  : phase === "planning" && planningLoading
+                    ? "当前方案生成中，请完成后再切换"
+                    : null;
+                const isVersionLocked = Boolean(
+                  versionSwitchLockMessage && !isSelectedVersion,
+                );
                 return (
                   <div
-                    className={`version-sidebar__item${isBuildLocked ? " is-build-locked" : ""}`}
-                    data-tooltip={isBuildLocked ? "当前版本构建中，请完成后再切换" : undefined}
+                    className={`version-sidebar__item${isVersionLocked ? " is-version-locked" : ""}`}
+                    data-tooltip={isVersionLocked ? versionSwitchLockMessage : undefined}
                     key={version.id}
                   >
                     <button
@@ -3289,14 +3296,14 @@ export default function Studio({
                       type="button"
                       onClick={() => chooseVersion(version)}
                       aria-current={isSelectedVersion ? "true" : undefined}
-                      aria-label={isBuildLocked
-                        ? `v${version.ordinal}，当前版本构建中，请完成后再切换`
+                      aria-label={isVersionLocked
+                        ? `v${version.ordinal}，${versionSwitchLockMessage}`
                         : undefined}
                       disabled={
                         accountSwitching
                         || versionsLoading
                         || Boolean(deletingProjectId)
-                        || isBuildLocked
+                        || isVersionLocked
                       }
                     >
                       <span><strong>v{version.ordinal}</strong><small>{index === 0 ? "当前版本" : "历史版本"}</small></span>

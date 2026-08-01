@@ -5403,12 +5403,12 @@ select:focus-visible {
   min-width: 0;
 }
 
-.version-sidebar__item.is-build-locked button {
+.version-sidebar__item.is-version-locked button {
   cursor: not-allowed;
   opacity: 0.48;
 }
 
-.version-sidebar__item.is-build-locked::after {
+.version-sidebar__item.is-version-locked::after {
   content: attr(data-tooltip);
   position: absolute;
   z-index: 8;
@@ -5429,7 +5429,7 @@ select:focus-visible {
   transition: opacity 120ms ease, transform 120ms ease;
 }
 
-.version-sidebar__item.is-build-locked:hover::after {
+.version-sidebar__item.is-version-locked:hover::after {
   opacity: 1;
   transform: translate(-50%, -50%);
 }
