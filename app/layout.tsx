@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { headers } from "next/headers";
 import "./globals.css";
 
-const title = "Forge — AI 创作工作台";
+const title = "Chance Atoms — AI 创作工作台";
 const description =
   "在同一个 AI 工作台中持续对话，或从一句话开始规划、生成、运行和迭代完整的单文件 Web App。";
 
@@ -20,13 +20,11 @@ export async function generateMetadata(): Promise<Metadata> {
     metadataBase = new URL("http://localhost:3000");
   }
 
-  const socialImage = new URL("/og.png", metadataBase).toString();
-
   return {
     metadataBase,
-    title: { default: title, template: "%s · Forge" },
+    title: { default: title, template: "%s · Chance Atoms" },
     description,
-    applicationName: "Forge",
+    applicationName: "Chance Atoms",
     keywords: [
       "AI 工作台",
       "AI 对话",
@@ -39,22 +37,13 @@ export async function generateMetadata(): Promise<Metadata> {
       type: "website",
       title,
       description,
-      siteName: "Forge",
+      siteName: "Chance Atoms",
       locale: "zh_CN",
-      images: [
-        {
-          url: socialImage,
-          width: 1744,
-          height: 928,
-          alt: "Forge — AI 创作工作台",
-        },
-      ],
     },
     twitter: {
       card: "summary_large_image",
       title,
       description,
-      images: [socialImage],
     },
   };
 }

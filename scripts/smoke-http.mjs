@@ -69,7 +69,7 @@ const artifactV2 = {
 
 const home = await fetch(`${baseUrl}/`);
 assert.equal(home.status, 200);
-assert.match(await home.text(), /Forge/);
+assert.match(await home.text(), /Chance Atoms/);
 
 const initial = await request("/api/projects");
 assert.equal(initial.response.status, 200);

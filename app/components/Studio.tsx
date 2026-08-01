@@ -19,8 +19,10 @@ import {
 } from "@/lib";
 import type { AppRecord } from "@/lib/app-spec";
 import { compileAppToHtml } from "@/lib/generator";
+import UiIcon from "./UiIcon";
 
 type StudioPhase = "home" | "planning" | "building" | "ready";
+type LandingView = "home" | "projects";
 type InspectorTab = "preview" | "code" | "spec";
 type PreviewSize = "desktop" | "mobile";
 type RetryAction = "projects" | "versions" | "plan" | "build" | "rollback" | null;
@@ -141,6 +143,46 @@ const STARTERS = [
     accent: "amber",
   },
 ] as const;
+
+const HOME_SUGGESTIONS = {
+  chat: [
+    {
+      label: "梳理一个产品思路",
+      prompt: "我有一个产品想法，请通过提问帮我梳理目标用户、核心场景、关键功能和最小可行版本。",
+      icon: "lightbulb",
+    },
+    {
+      label: "准备一轮面试问答",
+      prompt: "请基于 AI Agent 产品与工程岗位，和我进行一轮结构化模拟面试，并在每题后给出反馈。",
+      icon: "briefcase",
+    },
+  ],
+  web_app: [
+    {
+      label: "做一个霓虹贪吃蛇",
+      prompt: STARTERS[0].prompt,
+      icon: "gamepad",
+    },
+    {
+      label: "生成支持触屏的俄罗斯方块",
+      prompt: STARTERS[1].prompt,
+      icon: "panels",
+    },
+  ],
+} as const;
+
+const HOME_GUIDES = {
+  chat: [
+    { title: "持续对话", copy: "刷新后也能接着聊", icon: "message", tone: "coral" },
+    { title: "长期记忆", copy: "由你开启和编辑", icon: "brain", tone: "blue" },
+    { title: "项目保存", copy: "对话单独管理", icon: "folder", tone: "violet" },
+  ],
+  web_app: [
+    { title: "可运行预览", copy: "生成后直接体验", icon: "play", tone: "coral" },
+    { title: "代码可查看", copy: "产物可以直接导出", icon: "code", tone: "blue" },
+    { title: "版本演进", copy: "修改、回退都有记录", icon: "history", tone: "violet" },
+  ],
+} as const;
 
 const LOCAL_CODEX_BRIDGE = "http://127.0.0.1:4317";
 const LOCAL_BRIDGE_TIMEOUT_MS = 1_200;
@@ -626,7 +668,8 @@ function safeCompile(
 
 export default function Studio() {
   const [phase, setPhase] = useState<StudioPhase>("home");
-  const [capability, setCapability] = useState<ProjectKind>("web_app");
+  const [landingView, setLandingView] = useState<LandingView>("home");
+  const [capability, setCapability] = useState<ProjectKind>("chat");
   const [prompt, setPrompt] = useState("");
   const [instruction, setInstruction] = useState("");
   const [projects, setProjects] = useState<ProjectItem[]>([]);
@@ -915,6 +958,7 @@ export default function Studio() {
     chatRequestRef.current += 1;
     chatSendInFlightRef.current = false;
     setPhase("home");
+    setLandingView("home");
     setVersionsLoading(false);
     setActiveProject(null);
     setVersions([]);
@@ -1742,7 +1786,7 @@ export default function Studio() {
       const disposition = response.headers.get("content-disposition") ?? "";
       const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
       const quotedName = disposition.match(/filename="([^"]+)"/i)?.[1];
-      let fileName = `${getArtifactTitle(activeVersion.artifact, "forge-app")}.zip`;
+      let fileName = `${getArtifactTitle(activeVersion.artifact, "atoms-app")}.zip`;
       try {
         fileName = encodedName ? decodeURIComponent(encodedName) : quotedName || fileName;
       } catch {
@@ -1834,274 +1878,267 @@ export default function Studio() {
     setPhase(activeProject ? "ready" : "home");
   };
 
-  if (phase === "home") {
+  if (phase === "home" && landingView === "projects") {
     return (
-      <main className="forge-home">
-        <header className="forge-home__header">
-          <a className="forge-brand" href="#top" aria-label="Forge 首页">
-            <span className="forge-brand__mark" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-            </span>
-            <span className="forge-brand__word">Forge</span>
-            <span className="forge-brand__badge">AI Builder</span>
-          </a>
-          <div className="forge-home__header-actions">
-            <div className="forge-home__status">
-              <span className="status-dot status-dot--live" aria-hidden="true" />
-              Builder online
+      <main className="atoms-shell">
+        <AtomsSidebar
+          active="projects"
+          projectCount={projects.length}
+          user={user}
+          sessionLoading={sessionLoading}
+          loginLoading={loginLoading}
+          logoutLoading={logoutLoading}
+          busy={accountSwitching || workspaceWriteBusy}
+          onHome={() => setLandingView("home")}
+          onProjects={() => setLandingView("projects")}
+          onLogin={() => void beginLogin()}
+          onLogout={() => void handleLogout()}
+        />
+
+        <section className="atoms-page atoms-projects-page" aria-labelledby="atoms-projects-title">
+          <header className="atoms-page-header">
+            <div>
+              <span>CHANCE 的工作区</span>
+              <h1 id="atoms-projects-title">我的项目</h1>
+              <p>管理已经保存的 Web App 和对话，随时继续上一次工作。</p>
             </div>
-            <AccountControl
-              user={user}
-              loading={sessionLoading}
-              loginLoading={loginLoading}
-              logoutLoading={logoutLoading}
-              onLogin={() => void beginLogin()}
-              onLogout={() => void handleLogout()}
-            />
-          </div>
-        </header>
-
-        <section className="forge-hero" id="top" aria-labelledby="forge-title">
-          <div className="forge-hero__eyebrow">
-            <span aria-hidden="true">✦</span>
-            从一句话到可运行工具
-          </div>
-          <h1 id="forge-title">
-            构建应用，也可以
-            <span>直接开始对话。</span>
-          </h1>
-          <p className="forge-hero__lead">
-            选择 Web App 构建或长期对话。Web App 会先生成可反复调整的 BuildPlan，两种能力都作为独立项目保存和管理。
-          </p>
-
-          <div className="capability-switch" role="tablist" aria-label="选择 Agent 能力">
             <button
+              className="atoms-primary-action"
               type="button"
-              role="tab"
-              aria-selected={capability === "web_app"}
-              className={capability === "web_app" ? "is-active" : ""}
-              onClick={() => setCapability("web_app")}
+              onClick={() => setLandingView("home")}
               disabled={accountSwitching || workspaceWriteBusy}
             >
-              <span aria-hidden="true">◇</span>
-              <strong>构建 Web App</strong>
-              <small>先调整方案，再生成可运行网页</small>
+              <UiIcon name="plus" />
+              创建新项目
             </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={capability === "chat"}
-              className={capability === "chat" ? "is-active" : ""}
-              onClick={() => setCapability("chat")}
-              disabled={accountSwitching || workspaceWriteBusy}
-            >
-              <span aria-hidden="true">✦</span>
-              <strong>开始对话</strong>
-              <small>连续交流，并可配置长期记忆</small>
-            </button>
+          </header>
+
+          <div className="atoms-project-summary" aria-label="项目统计">
+            <span><UiIcon name="folder" /><strong>{projects.length} 个项目</strong></span>
+            <span><UiIcon name="panels" />{projects.filter((item) => item.kind === "web_app").length} 个 Web App</span>
+            <span><UiIcon name="message" />{projects.filter((item) => item.kind === "chat").length} 个对话</span>
           </div>
 
-          <form className="prompt-composer" onSubmit={submitNewProject}>
-            <label className="sr-only" htmlFor="forge-prompt">
-              {capability === "web_app" ? "描述你想创建的应用" : "输入第一条对话消息"}
-            </label>
-            <textarea
-              id="forge-prompt"
-              value={prompt}
-              onChange={(event) => handlePromptChange(event.target.value)}
-              onKeyDown={handlePromptKeyDown}
-              placeholder={
-                capability === "web_app"
-                  ? "例如：做一个支持键盘和触屏操作的霓虹贪吃蛇……"
-                  : "例如：帮我制定接下来一个月的面试准备计划……"
-              }
-              rows={4}
-              maxLength={1200}
-              autoFocus
-              disabled={accountSwitching || workspaceWriteBusy}
-            />
-            <div className="model-route" aria-label="生成能力">
-              <span><i aria-hidden="true" /> {capability === "web_app" ? "Web App" : "对话 Agent"}</span>
-              <small>优先线上 OpenAI · 未配置时使用本机 Codex</small>
+          <div className="atoms-sync-note" role="status" aria-live="polite">
+            <span><UiIcon name={user ? "github" : "folder-heart"} /></span>
+            <div>
+              <strong>{user ? `已同步至 ${user.login} 的 GitHub 账号` : "当前为访客工作区"}</strong>
+              <p>{user ? "登录后可以在其他设备继续使用这些项目。" : "项目会保存在当前浏览器，登录 GitHub 后可跨设备访问。"}</p>
             </div>
-            <div className="prompt-composer__footer">
-              <span className="prompt-composer__hint">
-                <kbd>⌘</kbd><kbd>↵</kbd> 提交 · {capability === "web_app" ? "先规划，再确认构建" : "创建项目并发送消息"}
-              </span>
-              <button
-                className="forge-button forge-button--primary"
-                type="submit"
-                disabled={accountSwitching || workspaceWriteBusy}
-              >
-                <span>{capability === "web_app" ? "生成计划" : "开始对话"}</span>
-                <span aria-hidden="true">→</span>
-              </button>
-            </div>
-          </form>
+          </div>
 
-          {errorMessage ? (
-            <ErrorBanner
-              message={errorMessage}
-              onRetry={retryAction ? handleRetry : undefined}
-            />
-          ) : null}
-        </section>
+          {errorMessage ? <ErrorBanner message={errorMessage} onRetry={retryAction ? handleRetry : undefined} /> : null}
 
-        {capability === "web_app" ? (
-        <section className="forge-starters" aria-labelledby="starters-title">
-          <div className="section-heading">
-            <div>
-              <span className="section-heading__kicker">START WITH A BLUEPRINT</span>
-              <h2 id="starters-title">选一个灵感，马上开工</h2>
-            </div>
-            <p>点击卡片会把完整描述放入输入框，你仍然可以继续修改。</p>
-          </div>
-          <div className="starter-grid">
-            {STARTERS.map((starter, index) => (
-              <button
-                className={`starter-card starter-card--${starter.accent}`}
-                type="button"
-                key={starter.title}
-                onClick={() => {
-                  setPrompt(starter.prompt);
-                  document.getElementById("forge-prompt")?.focus();
-                }}
-              >
-                <span className="starter-card__index" aria-hidden="true">
-                  0{index + 1}
-                </span>
-                <span className="starter-card__eyebrow">{starter.eyebrow}</span>
-                <strong>{starter.title}</strong>
-                <span className="starter-card__description">{starter.description}</span>
-                <span className="starter-card__action">
-                  使用这个蓝图 <span aria-hidden="true">↗</span>
-                </span>
-              </button>
-            ))}
-          </div>
-        </section>
-        ) : (
-          <section className="chat-intro" aria-label="对话能力说明">
-            <div>
-              <span className="section-heading__kicker">LONG-RUNNING CONVERSATION</span>
-              <h2>让每段对话保留自己的上下文</h2>
-              <p>创建后可以连续追问，并在工作区里配置这个对话专属的长期记忆。</p>
-            </div>
-            <ol>
-              <li><span>01</span>创建独立对话项目</li>
-              <li><span>02</span>按需写入长期记忆</li>
-              <li><span>03</span>下次打开继续交流</li>
-            </ol>
-          </section>
-        )}
-
-        <section className="recent-projects" aria-labelledby="recent-title">
-          <div className="section-heading section-heading--inline">
-            <div>
-              <span className="section-heading__kicker">YOUR WORKSPACE</span>
-              <h2 id="recent-title">最近项目</h2>
-            </div>
-            {!projectsLoading && projects.length ? (
-              <span>{projects.length} 个已保存项目</span>
-            ) : null}
-          </div>
-          <div
-            className={`workspace-sync-note${user ? " workspace-sync-note--account" : ""}`}
-            role="status"
-            aria-live="polite"
-          >
-            <span className="workspace-sync-note__icon" aria-hidden="true">
-              {sessionLoading ? "···" : user ? "✓" : "◇"}
-            </span>
-            <div>
-              <strong>
-                {sessionLoading
-                  ? "正在确认保存方式"
-                  : user
-                    ? `已同步至 ${user.login} 的账号`
-                    : "访客工作区"}
-              </strong>
-              <p>
-                {sessionLoading
-                  ? "你的项目列表会在工作区准备好后显示。"
-                  : user
-                    ? "项目已绑定 GitHub 账号，可在其他设备登录后继续使用。"
-                    : "项目已保存到当前浏览器，登录后可跨设备访问。"}
-              </p>
-            </div>
-          </div>
           {projectsLoading ? (
-            <div
-              className="recent-grid"
-              role="status"
-              aria-label="正在载入最近项目"
-              aria-busy="true"
-            >
-              {[0, 1, 2].map((item) => (
-                <div className="project-card project-card--skeleton" key={item}>
-                  <span />
-                  <span />
-                  <span />
-                </div>
-              ))}
+            <div className="atoms-project-grid" role="status" aria-label="正在载入项目" aria-busy="true">
+              {[0, 1, 2].map((item) => <div className="atoms-project-card atoms-project-card--skeleton" key={item} />)}
             </div>
-          ) : projects.length ? (
-            <div className="recent-grid">
-              {projects.slice(0, 6).map((project, index) => (
-                <article
-                  className="project-card"
-                  key={project.id}
-                >
+          ) : errorMessage && retryAction === "projects" ? null : projects.length ? (
+            <div className="atoms-project-grid">
+              {projects.map((project, index) => (
+                <article className={`atoms-project-card atoms-project-card--tone-${(index % 3) + 1}`} key={project.id}>
                   <button
-                    className="project-card__open"
+                    className={`atoms-project-card__cover atoms-project-card__cover--${project.kind}`}
                     type="button"
                     onClick={() => void openProject(project)}
                     disabled={accountSwitching || workspaceWriteBusy}
+                    aria-label={`打开项目 ${project.name}`}
                   >
-                    <span className={`project-card__icon project-card__icon--${(index % 3) + 1}`}>
-                      {project.kind === "chat" ? "✦" : project.name.slice(0, 1).toUpperCase()}
+                    <span className="atoms-project-card__visual" aria-hidden="true">
+                      <UiIcon name={project.kind === "chat" ? "message" : "gamepad"} />
+                      <i /><i /><i />
                     </span>
-                    <span className="project-card__content">
-                      <span className="project-card__kind">
-                        {project.kind === "chat" ? "对话" : "Web App"}
+                    <span className="atoms-project-card__cover-label">
+                      <UiIcon name={project.kind === "chat" ? "brain" : "play"} />
+                      {project.kind === "chat" ? "可继续对话" : "可运行预览"}
+                    </span>
+                  </button>
+                  <div className="atoms-project-card__body">
+                    <div className="atoms-project-card__heading">
+                      <span>
+                        <strong>{project.name}</strong>
+                        <small>{project.kind === "chat" ? "对话项目" : `Web App · v${project.currentVersion || 1}`}</small>
                       </span>
-                      <strong>{project.name}</strong>
-                      <span>{project.prompt || (project.kind === "chat" ? "继续这段对话" : "打开并继续完善这个应用")}</span>
-                    </span>
-                    <span className="project-card__meta">
-                      {formatRelativeDate(project.updatedAt ?? project.createdAt)}
-                      <span aria-hidden="true">→</span>
-                    </span>
-                  </button>
-                  <button
-                    className="project-card__delete"
-                    type="button"
-                    onClick={() => void deleteProject(project)}
-                    disabled={accountSwitching || workspaceWriteBusy}
-                    aria-label={`删除项目 ${project.name}`}
-                  >
-                    {deletingProjectId === project.id ? "…" : "删除"}
-                  </button>
+                      <button
+                        className="atoms-icon-action atoms-icon-action--danger"
+                        type="button"
+                        onClick={() => void deleteProject(project)}
+                        disabled={accountSwitching || workspaceWriteBusy}
+                        aria-label={`删除项目 ${project.name}`}
+                      >
+                        {deletingProjectId === project.id ? "…" : <UiIcon name="trash" />}
+                      </button>
+                    </div>
+                    <p>{project.prompt || (project.kind === "chat" ? "继续这段对话，并使用项目级长期记忆。" : "打开并继续完善这个应用。")}</p>
+                    <div className="atoms-project-card__footer">
+                      <span><UiIcon name="clock" />{formatRelativeDate(project.updatedAt ?? project.createdAt)}</span>
+                      <button
+                        type="button"
+                        onClick={() => void openProject(project)}
+                        disabled={accountSwitching || workspaceWriteBusy}
+                      >
+                        {project.kind === "chat" ? "继续对话" : "继续构建"}
+                        <UiIcon name="arrow-right" />
+                      </button>
+                    </div>
+                  </div>
                 </article>
               ))}
             </div>
           ) : (
-            <div className="recent-empty">
-              <span className="recent-empty__symbol" aria-hidden="true">◇</span>
-              <div>
-                <strong>这里还很安静</strong>
-                <p>第一个应用生成后会自动出现在这里。</p>
-              </div>
+            <div className="atoms-project-empty">
+              <span><UiIcon name="folder" /></span>
+              <strong>还没有项目</strong>
+              <p>从一次对话或一个 Web App 想法开始。</p>
+              <button type="button" className="atoms-primary-action" onClick={() => setLandingView("home")}>
+                <UiIcon name="plus" />创建第一个项目
+              </button>
             </div>
           )}
         </section>
+        <NoticeToast notice={notice} />
+      </main>
+    );
+  }
 
-        <footer className="forge-home__footer">
-          <span>FORGE / AI APPLICATION BUILDER</span>
-          <span>Plan · Build · Run · Refine</span>
-        </footer>
+  if (phase === "home") {
+    const suggestions = HOME_SUGGESTIONS[capability];
+    const guides = HOME_GUIDES[capability];
+
+    return (
+      <main className="atoms-shell">
+        <AtomsSidebar
+          active="home"
+          projectCount={projects.length}
+          user={user}
+          sessionLoading={sessionLoading}
+          loginLoading={loginLoading}
+          logoutLoading={logoutLoading}
+          busy={accountSwitching || workspaceWriteBusy}
+          onHome={() => setLandingView("home")}
+          onProjects={() => setLandingView("projects")}
+          onLogin={() => void beginLogin()}
+          onLogout={() => void handleLogout()}
+        />
+
+        <section className="atoms-page atoms-home-page" aria-labelledby="atoms-home-title">
+          <header className="atoms-home-topbar">
+            <span className="atoms-provider-status"><span className="status-dot status-dot--live" aria-hidden="true" />模型自动路由</span>
+          </header>
+
+          <div className="atoms-home-hero">
+            <div className="atoms-orbit" aria-hidden="true">
+              <span><UiIcon name="message" /></span>
+              <span><UiIcon name="code" /></span>
+              <span><UiIcon name="brain" /></span>
+              <span><UiIcon name="sparkles" /></span>
+            </div>
+            <span className="atoms-eyebrow">AI 创作工作台</span>
+            <h1 id="atoms-home-title">{capability === "chat" ? "今天想聊点什么？" : "今天想创造什么？"}</h1>
+            <p>
+              {capability === "chat"
+                ? "创建一个持续对话，历史消息和你配置的长期记忆都会保存在当前项目。"
+                : "描述你的想法，生成可运行、可继续修改并保留历史版本的 Web App。"}
+            </p>
+
+            <div className="atoms-capability-switch" role="tablist" aria-label="选择能力">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={capability === "chat"}
+                className={capability === "chat" ? "is-active is-chat" : "is-chat"}
+                onClick={() => setCapability("chat")}
+                disabled={accountSwitching || workspaceWriteBusy}
+              >
+                <span><UiIcon name="message" /></span>
+                <span><strong>对话</strong><small>持续交流与长期记忆</small></span>
+                <UiIcon name="check-circle" />
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={capability === "web_app"}
+                className={capability === "web_app" ? "is-active is-web" : "is-web"}
+                onClick={() => setCapability("web_app")}
+                disabled={accountSwitching || workspaceWriteBusy}
+              >
+                <span><UiIcon name="panels" /></span>
+                <span><strong>Web App 构建</strong><small>可运行预览与版本演进</small></span>
+                <UiIcon name="check-circle" />
+              </button>
+            </div>
+
+            <form className="atoms-composer" onSubmit={submitNewProject}>
+              <label className="sr-only" htmlFor="atoms-prompt">
+                {capability === "web_app" ? "描述你想创建的应用" : "输入第一条对话消息"}
+              </label>
+              <textarea
+                id="atoms-prompt"
+                value={prompt}
+                onChange={(event) => handlePromptChange(event.target.value)}
+                onKeyDown={handlePromptKeyDown}
+                placeholder={
+                  capability === "web_app"
+                    ? "例如：做一个支持键盘和触屏操作的俄罗斯方块……"
+                    : "输入问题、想法，或者一段需要继续讨论的内容……"
+                }
+                rows={4}
+                maxLength={1200}
+                autoFocus
+                disabled={accountSwitching || workspaceWriteBusy}
+              />
+              <div className="atoms-composer__footer">
+                <span className="atoms-mode-note">
+                  <span><UiIcon name={capability === "chat" ? "brain" : "history"} /></span>
+                  {capability === "chat" ? "长期记忆可配置" : "支持持续修改与版本回退"}
+                </span>
+                <span className="atoms-composer__actions">
+                  <small>{capability === "chat" ? "开始对话" : "开始构建"}</small>
+                  <button type="submit" aria-label={capability === "chat" ? "开始对话" : "开始构建"} disabled={accountSwitching || workspaceWriteBusy}>
+                    <UiIcon name="arrow-up" />
+                  </button>
+                </span>
+              </div>
+            </form>
+
+            <div className="atoms-suggestions" aria-label="推荐输入">
+              <small>可以试试</small>
+              {suggestions.map((suggestion) => (
+                <button
+                  type="button"
+                  key={suggestion.label}
+                  onClick={() => {
+                    setPrompt(suggestion.prompt);
+                    document.getElementById("atoms-prompt")?.focus();
+                  }}
+                >
+                  <UiIcon name={suggestion.icon} />
+                  {suggestion.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="atoms-guide-grid" aria-label="功能引导">
+              {guides.map((guide) => (
+                <div className={`atoms-guide-item atoms-guide-item--${guide.tone}`} key={guide.title}>
+                  <span><UiIcon name={guide.icon} /></span>
+                  <span><strong>{guide.title}</strong><small>{guide.copy}</small></span>
+                </div>
+              ))}
+            </div>
+
+            <button className="atoms-project-handoff" type="button" onClick={() => setLandingView("projects")}>
+              <span><UiIcon name="folder-heart" /></span>
+              <span>
+                <strong>创作内容会自动保存</strong>
+                <small>对话和 Web App 可在「我的项目」中继续查看、编辑或删除</small>
+              </span>
+              <UiIcon name="arrow-right" />
+            </button>
+
+            {errorMessage ? <ErrorBanner message={errorMessage} onRetry={retryAction ? handleRetry : undefined} /> : null}
+          </div>
+        </section>
         <NoticeToast notice={notice} />
       </main>
     );
@@ -2119,8 +2156,8 @@ export default function Studio() {
             onClick={resetToHome}
             disabled={accountSwitching || workspaceWriteBusy}
           >
-            <span className="forge-brand__mark" aria-hidden="true"><span /><span /><span /></span>
-            <span className="forge-brand__word">Forge</span>
+            <span className="atoms-logo-mark" aria-hidden="true"><UiIcon name="atom" /></span>
+            <span className="forge-brand__word">Atoms</span>
           </button>
           <span className="studio-topbar__divider" aria-hidden="true">/</span>
           <div className="studio-topbar__project">
@@ -2149,7 +2186,7 @@ export default function Studio() {
               onLogout={() => void handleLogout()}
               compact
             />
-            <button className="icon-button" type="button" onClick={resetToHome} aria-label="新建项目" disabled={accountSwitching || workspaceWriteBusy}>＋</button>
+            <button className="icon-button" type="button" onClick={resetToHome} aria-label="新建项目" disabled={accountSwitching || workspaceWriteBusy}><UiIcon name="plus" /></button>
           </div>
         </header>
 
@@ -2158,7 +2195,7 @@ export default function Studio() {
             <div className="sidebar-section sidebar-section--versions">
               <div className="sidebar-section__heading">
                 <span>全部项目</span>
-                <button type="button" onClick={resetToHome} aria-label="创建新项目" disabled={accountSwitching || workspaceWriteBusy}>＋</button>
+                <button type="button" onClick={resetToHome} aria-label="创建新项目" disabled={accountSwitching || workspaceWriteBusy}><UiIcon name="plus" /></button>
               </div>
               <div className="sidebar-projects">
                 {projects.map((project) => (
@@ -2170,7 +2207,7 @@ export default function Studio() {
                       disabled={accountSwitching || workspaceWriteBusy}
                     >
                       <span className="sidebar-projects__mark" aria-hidden="true">
-                        {project.kind === "chat" ? "✦" : project.name.slice(0, 1).toUpperCase()}
+                        <UiIcon name={project.kind === "chat" ? "message" : "panels"} />
                       </span>
                       <span>{project.name}</span>
                       <small>{project.kind === "chat" ? "对话" : "Web"}</small>
@@ -2181,7 +2218,7 @@ export default function Studio() {
                       onClick={() => void deleteProject(project)}
                       disabled={accountSwitching || workspaceWriteBusy}
                       aria-label={`删除项目 ${project.name}`}
-                    >×</button>
+                    ><UiIcon name="trash" /></button>
                   </div>
                 ))}
               </div>
@@ -2192,8 +2229,8 @@ export default function Studio() {
           <section className="chat-workspace" aria-labelledby="chat-title">
             <header className="chat-workspace__header">
               <div>
-                <span className="agent-avatar" aria-hidden="true">✦</span>
-                <div><strong id="chat-title">Forge Agent</strong><span>连续对话</span></div>
+                <span className="agent-avatar" aria-hidden="true"><UiIcon name="sparkles" /></span>
+                <div><strong id="chat-title">Atoms Agent</strong><span>连续对话</span></div>
               </div>
               <span className="agent-status"><i aria-hidden="true" /> 在线</span>
             </header>
@@ -2201,15 +2238,15 @@ export default function Studio() {
             <div className="chat-thread" aria-live="polite">
               {errorMessage ? <ErrorBanner message={errorMessage} /> : null}
               {chatLoading ? (
-                <div className="chat-empty" role="status"><span>✦</span><strong>正在读取对话…</strong></div>
+                <div className="chat-empty" role="status"><span><UiIcon name="message" /></span><strong>正在读取对话…</strong></div>
               ) : chatMessages.length ? (
                 chatMessages.map((message) => (
                   <article className={`chat-message chat-message--${message.role}`} key={message.id}>
                     <span className="chat-message__avatar" aria-hidden="true">
-                      {message.role === "assistant" ? "✦" : "你"}
+                      {message.role === "assistant" ? <UiIcon name="sparkles" /> : "你"}
                     </span>
                     <div>
-                      <strong>{message.role === "assistant" ? "Forge Agent" : "你"}</strong>
+                      <strong>{message.role === "assistant" ? "Atoms Agent" : "你"}</strong>
                       <p>{message.content}</p>
                       {message.role === "assistant" && message.provider ? (
                         <small>{providerLabel(message.provider)}{message.model ? ` · ${message.model}` : ""}</small>
@@ -2218,12 +2255,12 @@ export default function Studio() {
                   </article>
                 ))
               ) : (
-                <div className="chat-empty"><span>✦</span><strong>开始这段对话</strong><p>输入消息，模型会结合当前记录和已启用的长期记忆回复。</p></div>
+                <div className="chat-empty"><span><UiIcon name="message" /></span><strong>开始这段对话</strong><p>输入消息，模型会结合当前记录和已启用的长期记忆回复。</p></div>
               )}
               {chatSending ? (
                 <article className="chat-message chat-message--assistant chat-message--typing">
-                  <span className="chat-message__avatar" aria-hidden="true">✦</span>
-                  <div><strong>Forge Agent</strong><p>正在思考并回复…</p></div>
+                  <span className="chat-message__avatar" aria-hidden="true"><UiIcon name="sparkles" /></span>
+                  <div><strong>Atoms Agent</strong><p>正在思考并回复…</p></div>
                 </article>
               ) : null}
             </div>
@@ -2311,12 +2348,8 @@ export default function Studio() {
           onClick={resetToHome}
           disabled={accountSwitching || workspaceWriteBusy}
         >
-          <span className="forge-brand__mark" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-          </span>
-          <span className="forge-brand__word">Forge</span>
+          <span className="atoms-logo-mark" aria-hidden="true"><UiIcon name="atom" /></span>
+          <span className="forge-brand__word">Atoms</span>
         </button>
         <span className="studio-topbar__divider" aria-hidden="true">/</span>
         <div className="studio-topbar__project">
@@ -2358,7 +2391,7 @@ export default function Studio() {
             aria-label="新建应用"
             disabled={accountSwitching || workspaceWriteBusy}
           >
-            <span aria-hidden="true">＋</span>
+            <UiIcon name="plus" />
           </button>
         </div>
       </header>
@@ -2373,7 +2406,7 @@ export default function Studio() {
                 onClick={resetToHome}
                 aria-label="创建新项目"
                 disabled={accountSwitching || workspaceWriteBusy}
-              >＋</button>
+              ><UiIcon name="plus" /></button>
             </div>
             <div className="sidebar-projects">
               {projects.map((project) => (
@@ -2389,7 +2422,7 @@ export default function Studio() {
                     disabled={accountSwitching || workspaceWriteBusy}
                   >
                     <span className="sidebar-projects__mark" aria-hidden="true">
-                      {project.kind === "chat" ? "✦" : project.name.slice(0, 1).toUpperCase()}
+                      <UiIcon name={project.kind === "chat" ? "message" : "panels"} />
                     </span>
                     <span>{project.name}</span>
                     <small>{project.kind === "chat" ? "对话" : "Web"}</small>
@@ -2400,12 +2433,12 @@ export default function Studio() {
                     onClick={() => void deleteProject(project)}
                     disabled={accountSwitching || workspaceWriteBusy}
                     aria-label={`删除项目 ${project.name}`}
-                  >×</button>
+                  ><UiIcon name="trash" /></button>
                 </div>
               ))}
               {!activeProject && pendingBuild ? (
                 <div className="sidebar-projects__draft">
-                  <span className="sidebar-projects__mark" aria-hidden="true">F</span>
+                  <span className="sidebar-projects__mark" aria-hidden="true"><UiIcon name="panels" /></span>
                   <span>{workspaceName}</span>
                   <small>草稿</small>
                 </div>
@@ -2461,9 +2494,9 @@ export default function Studio() {
         <section className="agent-panel" aria-labelledby="agent-title">
           <header className="panel-header">
             <div>
-              <span className="agent-avatar" aria-hidden="true">✦</span>
+              <span className="agent-avatar" aria-hidden="true"><UiIcon name="sparkles" /></span>
               <div>
-                <strong id="agent-title">Forge Agent</strong>
+                <strong id="agent-title">Atoms Agent</strong>
                 <span>{phase === "building" ? "正在执行计划" : "与你一起构建"}</span>
               </div>
             </div>
@@ -2482,11 +2515,11 @@ export default function Studio() {
                   key={message.id}
                 >
                   <div className="message__identity" aria-hidden="true">
-                    {message.role === "agent" ? "✦" : "你"}
+                    {message.role === "agent" ? <UiIcon name="sparkles" /> : "你"}
                   </div>
                   <div className="message__body">
                     <span className="message__author">
-                      {message.role === "agent" ? "Forge Agent" : "You"}
+                      {message.role === "agent" ? "Atoms Agent" : "你"}
                     </span>
                     <p>{message.text}</p>
                     {message.meta ? <small>{message.meta}</small> : null}
@@ -2672,7 +2705,7 @@ export default function Studio() {
                 <div className="building-card__orb" aria-hidden="true">
                   <span /><span /><i>✦</i>
                 </div>
-                <span className="section-heading__kicker">FORGE IS BUILDING</span>
+                <span className="section-heading__kicker">ATOMS IS BUILDING</span>
                 <h2 id="building-title">正在把计划变成应用</h2>
                 <p>正在调用真实生成服务。完成时间取决于模型响应。</p>
                 <ol className="building-log">
@@ -2783,7 +2816,7 @@ export default function Studio() {
                   onClick={() => void exportProject()}
                   disabled={exportLoading}
                 >
-                  <span aria-hidden="true">↓</span>
+                  <UiIcon name="download" />
                   {exportLoading ? "正在导出…" : "导出项目"}
                 </button>
               ) : null}
@@ -2824,11 +2857,11 @@ export default function Studio() {
                   >
                     <div className="preview-device__chrome" aria-hidden="true">
                       <span /><span /><span />
-                      <div>forge.app/{activeProject?.id.slice(0, 8)}</div>
+                      <div>chance-atoms.app/{activeProject?.id.slice(0, 8)}</div>
                     </div>
                     <iframe
                       ref={iframeRef}
-                      title={`${activeProject?.name ?? "Forge 应用"} 可运行预览`}
+                      title={`${activeProject?.name ?? "Atoms 应用"} 可运行预览`}
                       srcDoc={previewHtml}
                       sandbox="allow-scripts allow-forms allow-modals"
                       referrerPolicy="no-referrer"
@@ -2888,6 +2921,109 @@ export default function Studio() {
 
       <NoticeToast notice={notice} />
     </main>
+  );
+}
+
+function AtomsSidebar({
+  active,
+  projectCount,
+  user,
+  sessionLoading,
+  loginLoading,
+  logoutLoading,
+  busy,
+  onHome,
+  onProjects,
+  onLogin,
+  onLogout,
+}: {
+  active: LandingView;
+  projectCount: number;
+  user: SessionUser | null;
+  sessionLoading: boolean;
+  loginLoading: boolean;
+  logoutLoading: boolean;
+  busy: boolean;
+  onHome: () => void;
+  onProjects: () => void;
+  onLogin: () => void;
+  onLogout: () => void;
+}) {
+  const workspaceLabel = user?.name || user?.login || "Chance";
+
+  return (
+    <aside className="atoms-sidebar" aria-label="主导航">
+      <div className="atoms-sidebar__brand">
+        <span className="atoms-logo-mark" aria-hidden="true"><UiIcon name="atom" /></span>
+        <strong>Atoms</strong>
+        <span>Demo</span>
+      </div>
+
+      <div className="atoms-workspace">
+        <span className="atoms-workspace__avatar" aria-hidden="true">
+          {Array.from(workspaceLabel.trim())[0]?.toUpperCase() || "C"}
+        </span>
+        <span>
+          <strong>{workspaceLabel} 的工作区</strong>
+          <small>{user ? `@${user.login}` : "本地访客空间"}</small>
+        </span>
+        <UiIcon name="chevron-down" />
+      </div>
+
+      <nav className="atoms-nav">
+        <button
+          type="button"
+          className={active === "home" ? "is-active" : ""}
+          aria-current={active === "home" ? "page" : undefined}
+          onClick={onHome}
+          disabled={busy}
+        >
+          <span><UiIcon name="home" /></span>
+          首页
+        </button>
+        <button
+          type="button"
+          className={active === "projects" ? "is-active" : ""}
+          aria-current={active === "projects" ? "page" : undefined}
+          onClick={onProjects}
+          disabled={busy}
+        >
+          <span><UiIcon name="folder" /></span>
+          我的项目
+          <small>{projectCount}</small>
+        </button>
+      </nav>
+
+      <div className="atoms-sidebar__section-label">创作能力</div>
+      <div className="atoms-sidebar__capabilities">
+        <span><UiIcon name="message" /><small>对话</small></span>
+        <span><UiIcon name="panels" /><small>Web App</small></span>
+      </div>
+
+      <div className="atoms-sidebar__guide">
+        <span><UiIcon name="sparkles" /></span>
+        <div>
+          <strong>从一个想法开始</strong>
+          <p>让 Agent 帮你持续讨论，或生成可运行的 Web App。</p>
+        </div>
+        <button type="button" onClick={onHome} disabled={busy} aria-label="开始创作">
+          <UiIcon name="arrow-right" />
+        </button>
+      </div>
+
+      <div className="atoms-sidebar__bottom">
+        <AccountControl
+          user={user}
+          loading={sessionLoading}
+          loginLoading={loginLoading}
+          logoutLoading={logoutLoading}
+          onLogin={onLogin}
+          onLogout={onLogout}
+          compact
+        />
+        <span className="atoms-sidebar__status"><i aria-hidden="true" />工作区已连接</span>
+      </div>
+    </aside>
   );
 }
 
@@ -3019,7 +3155,7 @@ function PreviewPlaceholder({ phase }: { phase: StudioPhase }) {
         <strong>{phase === "building" ? "正在生成预览" : "预览等待构建"}</strong>
         <p>
           {phase === "building"
-            ? "Forge 正在连接数据、界面与交互。"
+            ? "Atoms 正在连接数据、界面与交互。"
             : "确认左侧计划后，可运行应用会出现在这里。"}
         </p>
       </div>

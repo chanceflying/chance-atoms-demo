@@ -1,8 +1,8 @@
-# Chance Atoms Demo · Forge
+# Chance Atoms Demo
 
 > 一个从 6–8 小时笔试基线继续迭代的 AI 创作工作台 MVP。
 
-Forge 是 Demo 内的产品名，`chance-atoms-demo` 是仓库、Cloudflare Worker 和交付项目名。首版时间盒优先完成 Web App 生成主闭环；当前仓库是在该基线上的后续迭代版本，进一步加入了 GitHub 登录、版本管理、对话与长期记忆。用户现在可以创建两类项目：使用自然语言规划并生成可运行 Web App，或创建带可配置长期记忆的持续对话。两类项目共享 GitHub 登录、workspace、最近项目与删除能力。
+Chance Atoms 是 Demo 的产品名，`chance-atoms-demo` 同时也是仓库、Cloudflare Worker 和交付项目名。首版时间盒优先完成 Web App 生成主闭环；当前仓库是在该基线上的后续迭代版本，进一步加入了 GitHub 登录、版本管理、对话与长期记忆。用户现在可以创建两类项目：使用自然语言规划并生成可运行 Web App，或创建带可配置长期记忆的持续对话。两类项目共享 GitHub 登录、workspace、项目管理与删除能力。
 
 Web App 构建主线：
 

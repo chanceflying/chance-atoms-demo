@@ -6,18 +6,18 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import Studio from "../app/components/Studio";
 
-test("server-renders the single Web App product shell", () => {
+test("server-renders the Chance Atoms creation shell", () => {
   const html = renderToStaticMarkup(createElement(Studio));
 
-  assert.match(html, /从一句话到可运行工具/);
-  assert.match(html, /描述你想创建的应用/);
-  assert.match(html, /生成计划/);
-  assert.match(html, /BuildPlan/);
-  assert.match(html, /霓虹贪吃蛇/);
-  assert.match(html, /俄罗斯方块/);
-  assert.match(html, /扫雷挑战/);
-  assert.match(html, /最近项目/);
-  assert.match(html, /class="forge-home"/);
+  assert.match(html, /今天想聊点什么/);
+  assert.match(html, /对话/);
+  assert.match(html, /持续交流与长期记忆/);
+  assert.match(html, /Web App 构建/);
+  assert.match(html, /可运行预览与版本演进/);
+  assert.match(html, /创作内容会自动保存/);
+  assert.match(html, /我的项目/);
+  assert.match(html, /class="atoms-shell"/);
+  assert.doesNotMatch(html, /最近项目/);
   assert.doesNotMatch(html, /客户线索看板|内容发布日历|设备巡检台/);
   assert.doesNotMatch(html, /Your site is taking shape|react-loading-skeleton/);
 });
@@ -34,8 +34,10 @@ test("wires the real Studio and standard OpenNext deployment", async () => {
   assert.match(page, /import Studio from "\.\/components\/Studio"/);
   assert.match(page, /<Studio \/>/);
   assert.match(layout, /generateMetadata/);
-  assert.match(layout, /\/og\.png/);
-  assert.match(styles, /\.forge-home/);
+  assert.match(layout, /Chance Atoms/);
+  assert.doesNotMatch(layout, /\/og\.png/);
+  assert.match(styles, /\.atoms-shell/);
+  assert.match(styles, /\.atoms-project-grid/);
   assert.match(styles, /\.studio-shell/);
   assert.match(styles, /prefers-reduced-motion:\s*reduce/);
   assert.match(packageJson, /"name": "chance-atoms-demo"/);

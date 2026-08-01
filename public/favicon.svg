@@ -1,6 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect x="3" y="3" width="58" height="58" rx="17" fill="#c8ff52" stroke="#171816" stroke-width="4"/>
-  <rect x="16" y="16" width="12" height="32" rx="2" fill="#171816"/>
-  <rect x="34" y="16" width="14" height="12" rx="2" fill="#171816"/>
-  <rect x="34" y="34" width="9" height="14" rx="2" fill="#315bff"/>
+  <defs>
+    <linearGradient id="g" x1="10" y1="8" x2="54" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7482ed"/>
+      <stop offset="1" stop-color="#4f5fcf"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="17" fill="url(#g)"/>
+  <g fill="none" stroke="#fff" stroke-linecap="round" stroke-width="2.7">
+    <ellipse cx="32" cy="32" rx="22" ry="8.5" transform="rotate(30 32 32)"/>
+    <ellipse cx="32" cy="32" rx="22" ry="8.5" transform="rotate(150 32 32)"/>
+    <ellipse cx="32" cy="32" rx="22" ry="8.5" transform="rotate(90 32 32)"/>
+  </g>
+  <circle cx="32" cy="32" r="4" fill="#fff"/>
 </svg>
