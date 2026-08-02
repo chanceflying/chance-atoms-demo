@@ -1953,7 +1953,7 @@ select:focus-visible {
 .build-summary__topline p {
   margin: 4px 0 0;
   color: #7c7e77;
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.5;
 }
 
@@ -1970,7 +1970,7 @@ select:focus-visible {
   gap: 2px;
   padding: 10px 13px;
   color: #8b8d86;
-  font-size: 7px;
+  font-size: 10px;
 }
 
 .build-summary__stats span + span {
@@ -1980,7 +1980,7 @@ select:focus-visible {
 .build-summary__stats strong {
   color: var(--ink);
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .refine-composer {
@@ -2698,7 +2698,8 @@ select:focus-visible {
   margin-top: 7px;
   color: #999b94;
   font-family: var(--mono);
-  font-size: 7px;
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .chat-message--typing {
@@ -3533,18 +3534,22 @@ select:focus-visible {
 }
 
 .atoms-composer__actions button {
-  width: 36px;
-  height: 36px;
-  display: grid;
-  place-items: center;
+  min-width: 104px;
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
   border-radius: 11px;
   background: #292c29;
   color: #fff;
+  font-size: 12px;
+  font-weight: 750;
   box-shadow: 0 7px 16px rgba(31, 34, 31, 0.16);
 }
 
 .atoms-composer__actions button:hover:not(:disabled) {
-  background: #5666d2;
+  background: #181a18;
   transform: translateY(-1px);
 }
 

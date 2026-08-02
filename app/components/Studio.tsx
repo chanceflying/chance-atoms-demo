@@ -154,6 +154,22 @@ type Notice = {
   tone: "success" | "error";
 };
 
+const COMPOSER_PLACEHOLDER = "输入消息，Enter 发送，Shift + Enter 换行…";
+
+function submitComposerOnEnter(event: KeyboardEvent<HTMLTextAreaElement>) {
+  if (
+    event.key !== "Enter"
+    || event.shiftKey
+    || event.repeat
+    || event.nativeEvent.isComposing
+  ) {
+    return;
+  }
+
+  event.preventDefault();
+  event.currentTarget.form?.requestSubmit();
+}
+
 const STARTERS = [
   {
     eyebrow: "经典 · 街机",
@@ -2577,14 +2593,6 @@ export default function Studio({
     showNotice,
   ]);
 
-  const handlePromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-      event.preventDefault();
-      if (capability === "chat") void beginNewChat();
-      else beginNewPlan();
-    }
-  };
-
   const handlePromptChange = (value: string) => {
     setPrompt(value);
   };
@@ -2904,12 +2912,8 @@ export default function Studio({
                 id="atoms-prompt"
                 value={prompt}
                 onChange={(event) => handlePromptChange(event.target.value)}
-                onKeyDown={handlePromptKeyDown}
-                placeholder={
-                  capability === "web_app"
-                    ? "例如：做一个支持键盘和触屏操作的俄罗斯方块……"
-                    : "输入问题、想法，或者一段需要继续讨论的内容……"
-                }
+                onKeyDown={submitComposerOnEnter}
+                placeholder={COMPOSER_PLACEHOLDER}
                 rows={4}
                 maxLength={1200}
                 autoFocus
@@ -2921,9 +2925,8 @@ export default function Studio({
                   {capability === "chat" ? "长期记忆可配置" : "支持持续修改与版本回退"}
                 </span>
                 <span className="atoms-composer__actions">
-                  <small>{capability === "chat" ? "开始对话" : "开始构建"}</small>
                   <button type="submit" aria-label={capability === "chat" ? "开始对话" : "开始构建"} disabled={accountSwitching}>
-                    <UiIcon name="arrow-up" />
+                    {capability === "chat" ? "开始对话" : "开始构建"}
                   </button>
                 </span>
               </div>
@@ -3140,13 +3143,8 @@ export default function Studio({
                 id="chat-input"
                 value={chatInput}
                 onChange={(event) => setChatInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void sendChatMessage();
-                  }
-                }}
-                placeholder="输入消息，Enter 发送，Shift + Enter 换行…"
+                onKeyDown={submitComposerOnEnter}
+                placeholder={COMPOSER_PLACEHOLDER}
                 rows={3}
                 maxLength={4000}
                 disabled={chatLoading || chatSending || deletingProjectId === activeProject.id || accountSwitching}
@@ -3154,7 +3152,7 @@ export default function Studio({
               <div>
                 <span>{`当前上下文 ${chatMessages.length} 条`}</span>
                 <button type="submit" disabled={!chatInput.trim() || chatLoading || chatSending || deletingProjectId === activeProject.id || accountSwitching}>
-                  {chatSending ? "回复中…" : "发送"} <span aria-hidden="true">↑</span>
+                  {chatSending ? "回复中…" : "发送"}
                 </button>
               </div>
             </form>
@@ -3570,9 +3568,8 @@ export default function Studio({
                   if (phase === "planning") setPlanFeedback(event.target.value);
                   else setInstruction(event.target.value);
                 }}
-                placeholder={phase === "planning"
-                  ? "继续告诉 Agent 要增加、删除或修改什么……"
-                  : "例如：增加暂停按钮，把界面改成复古像素风……"}
+                onKeyDown={submitComposerOnEnter}
+                placeholder={COMPOSER_PLACEHOLDER}
                 rows={3}
                 maxLength={phase === "planning" ? 1000 : 800}
                 disabled={accountSwitching || planningLoading}
@@ -3617,7 +3614,7 @@ export default function Studio({
                       aria-label="生成调整计划"
                       disabled={!instruction.trim() || accountSwitching}
                     >
-                      发送 <UiIcon name="arrow-up" />
+                      发送
                     </button>
                   )}
                 </div>

@@ -14,6 +14,11 @@ test("server-renders the Chance Atoms creation shell", () => {
   assert.match(html, /围绕一个主题持续交流/);
   assert.match(html, /Web App 构建/);
   assert.match(html, /描述页面或游戏/);
+  assert.match(html, /placeholder="输入消息，Enter 发送，Shift \+ Enter 换行…"/);
+  assert.match(
+    html,
+    /<button type="submit" aria-label="开始对话">开始对话<\/button>/,
+  );
   assert.match(html, /创作内容会自动保存/);
   assert.match(html, /我的项目/);
   assert.match(html, /最近项目/);
@@ -49,7 +54,36 @@ test("wires the real Studio, persistent routes, and standard OpenNext deployment
     studio.indexOf('if (landingView === "home")'),
     studio.indexOf("const workspaceName"),
   );
+  const homeComposer = studio.slice(
+    studio.indexOf('<form className="atoms-composer"'),
+    studio.indexOf('<div className="atoms-suggestions"'),
+  );
+  const chatComposerStart = studio.indexOf('className="chat-composer"');
+  const chatComposer = studio.slice(
+    chatComposerStart,
+    studio.indexOf("{memoryPanelOpen ?", chatComposerStart),
+  );
+  const webComposerStart = studio.indexOf('className="web-agent-composer"');
+  const webComposer = studio.slice(
+    webComposerStart,
+    studio.indexOf('className="workspace-resizer"', webComposerStart),
+  );
   assert.doesNotMatch(homeView, /disabled=\{accountSwitching \|\| workspaceWriteBusy\}/);
+  assert.equal(
+    studio.match(/placeholder=\{COMPOSER_PLACEHOLDER\}/g)?.length,
+    3,
+  );
+  assert.equal(
+    studio.match(/onKeyDown=\{submitComposerOnEnter\}/g)?.length,
+    3,
+  );
+  assert.match(studio, /event\.nativeEvent\.isComposing/);
+  assert.match(homeComposer, /\{capability === "chat" \? "开始对话" : "开始构建"\}/);
+  assert.doesNotMatch(homeComposer, /arrow-up/);
+  assert.match(chatComposer, /\{chatSending \? "回复中…" : "发送"\}/);
+  assert.doesNotMatch(chatComposer, /arrow-up|aria-hidden="true">↑/);
+  assert.match(webComposer, />\s*发送\s*<\/button>/);
+  assert.doesNotMatch(webComposer, /arrow-up/);
   assert.match(studio, /useRef<Set<string>>\(new Set\(\)\)/);
   assert.match(studio, /backgroundChatProjectIdsRef\.current\.has\(project\.id\)/);
   assert.doesNotMatch(studio, /chatSendInFlightRef/);
@@ -65,6 +99,10 @@ test("wires the real Studio, persistent routes, and standard OpenNext deployment
   assert.doesNotMatch(studio, /你正在查看历史版本|恢复此版本|history-callout/);
   assert.match(styles, /\.project-title-editor/);
   assert.match(styles, /\.planning-card--inline h2\s*\{\s*font-size: 18px/);
+  assert.match(styles, /\.chat-message small\s*\{[^}]*font-size:\s*10px/);
+  assert.match(styles, /\.build-summary__topline p\s*\{[^}]*font-size:\s*10px/);
+  assert.match(styles, /\.build-summary__stats span\s*\{[^}]*font-size:\s*10px/);
+  assert.match(styles, /\.build-summary__stats strong\s*\{[^}]*font-size:\s*11px/);
   assert.match(styles, /\.version-sidebar__item\.is-version-locked:hover::after/);
   assert.match(bridge, /enqueueModelRequest/);
   assert.doesNotMatch(bridge, /已有模型任务正在执行|modelRequestInFlight/);
