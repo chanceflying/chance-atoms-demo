@@ -128,7 +128,7 @@ type ConversationMessage = {
 
 type GenerateResponse = {
   artifact: StoredArtifact;
-  provider: "codex_session" | "openai" | "local";
+  provider: "codex_session" | "remote_codex" | "openai" | "local";
   model: string | null;
   warning: string | null;
   stages: string[];
@@ -498,6 +498,7 @@ function cleanProjectTitle(value: string, fallback: string): string {
 
 function providerLabel(provider: string | null): string {
   if (provider === "codex_session") return "本机 Codex";
+  if (provider === "remote_codex") return "远程 Codex";
   if (provider === "openai") return "OpenAI";
   if (provider === "local") return "本地服务";
   return provider || "模型服务";
@@ -1849,6 +1850,8 @@ export default function Studio({
           provider:
             rawProvider === "openai"
               ? "openai"
+              : rawProvider === "remote_codex"
+                ? "remote_codex"
               : rawProvider === "codex_session"
                 ? "codex_session"
                 : "local",

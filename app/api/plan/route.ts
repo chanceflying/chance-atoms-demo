@@ -5,6 +5,11 @@ import {
   parseStoredArtifact,
   type WebAppArtifact,
 } from "@/lib";
+import {
+  getRemoteCodexConfig,
+  remoteCodexModel,
+  requestRemoteCodex,
+} from "@/lib/remote-codex";
 
 const MAX_INPUT_LENGTH = 12_000;
 const MAX_REQUEST_BYTES = 720_000;
@@ -146,7 +151,19 @@ export async function POST(request: Request) {
 
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   const model = process.env.OPENAI_MODEL?.trim() || DEFAULT_MODEL;
+  let remoteConfig: ReturnType<typeof getRemoteCodexConfig> = null;
   if (!apiKey) {
+    try {
+      remoteConfig = getRemoteCodexConfig();
+    } catch (error) {
+      console.error("Remote Codex configuration is invalid", error);
+      return NextResponse.json(
+        { error: "远程 Codex 配置无效，请检查服务端环境变量。" },
+        { status: 502 },
+      );
+    }
+  }
+  if (!apiKey && !remoteConfig) {
     return NextResponse.json(
       {
         error:
@@ -155,6 +172,48 @@ export async function POST(request: Request) {
         provider: "unavailable",
       },
       { status: 503 },
+    );
+  }
+
+  if (!apiKey && remoteConfig) {
+    try {
+      const payload = await requestRemoteCodex(
+        remoteConfig,
+        "plan",
+        {
+          prompt,
+          instruction,
+          previousArtifact,
+          ...(currentPlan ? { currentPlan, planFeedback } : {}),
+        },
+        130_000,
+      );
+      const reasoningSummary = Array.isArray(payload.reasoningSummary)
+        ? payload.reasoningSummary
+            .filter((item): item is string => typeof item === "string")
+            .map((item) => item.trim().slice(0, 2_000))
+            .filter(Boolean)
+            .slice(0, 8)
+        : [];
+      return NextResponse.json({
+        plan: parseBuildPlan(payload.plan),
+        reasoningSummary,
+        provider: "remote_codex",
+        model: remoteCodexModel(payload),
+      });
+    } catch (error) {
+      console.error("Remote Codex Web App planning failed", error);
+      return NextResponse.json(
+        { error: "远程 Codex 规划失败，请稍后重试。" },
+        { status: 502 },
+      );
+    }
+  }
+
+  if (!apiKey) {
+    return NextResponse.json(
+      { error: "模型服务配置无效。" },
+      { status: 502 },
     );
   }
 

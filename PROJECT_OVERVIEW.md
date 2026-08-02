@@ -57,7 +57,9 @@ flowchart LR
     D["Cloudflare D1"]
     G["GitHub OAuth"]
     O["OpenAI Responses API"]
-    C["Local Codex Bridge"]
+    R["Remote Mac Codex Bridge<br/>HTTPS + Bearer / E2EE"]
+    L["Browser-local Codex Bridge"]
+    X["Codex CLI<br/>ChatGPT subscription"]
     P["sandbox iframe"]
 
     B -->|"pages and /api/*"| E
@@ -65,7 +67,10 @@ flowchart LR
     W --> D
     W --> G
     W -->|"API Key configured"| O
-    B -->|"only when API Key is absent"| C
+    W -->|"otherwise REMOTE_CODEX_*"| R
+    B -->|"only when neither server Provider exists"| L
+    R --> X
+    L --> X
     B --> P
 ```
 
@@ -75,10 +80,10 @@ flowchart LR
 | 全栈框架 | Next.js 16 App Router | 页面路由与 Route Handlers 业务 API |
 | 在线运行 | OpenNext、Cloudflare Worker | 将 Next.js 后端和静态资源部署到 Cloudflare |
 | 数据 | Cloudflare D1、Drizzle migrations | 用户、Session、项目、版本、消息和记忆 |
-| 模型 | OpenAI Responses API / Local Codex Bridge | 规划、生成和对话 |
+| 模型 | OpenAI Responses API / Remote 或 Local Codex Bridge | 规划、生成和对话 |
 | 产物运行 | sandbox iframe | 隔离运行模型生成的单文件 Web App |
 
-线上 API Key 是正式 Provider 路径。没有配置时，浏览器只有在服务端明确返回 `OPENAI_NOT_CONFIGURED` 后，才会调用同一台电脑上的 Local Codex Bridge；不会把个人 ChatGPT/Codex 会话凭证上传到 Cloudflare。
+Provider 优先级固定为 `OPENAI_API_KEY` > `REMOTE_CODEX_BRIDGE_URL/TOKEN` > 浏览器 localhost Bridge。Remote Bridge 通用模式支持 HTTPS + Bearer；本次因公司安全软件拦截 cloudflared，经用户授权改用 localhost.run，并设置 `REMOTE_CODEX_BRIDGE_E2EE=1`。Worker 与 Bridge 用共享 Token 派生 AES-256-GCM 密钥，Token、Prompt 和回复不以明文经过 Tunnel，但这仍只是临时演示链路。Bridge 默认端口为 4317，本次旧端口被占用后通过 `CODEX_BRIDGE_PORT=4318` 切换。恢复时需重启 Bridge/Tunnel 并更新临时 URL，面试后应关闭进程并删除 Remote Secret。
 
 ## 4. 实现思路与关键取舍
 
@@ -96,7 +101,7 @@ flowchart LR
 - `BuildPlan`：需求摘要、设计决策、交互流程、实现步骤和验收标准；
 - `WebAppArtifact`：标题、描述、完整 HTML 和验收标准。
 
-OpenAI Route 与本机 Bridge 分别执行 JSON Schema 约束和运行时校验。页面展示的是可审阅的方案和模型决策摘要，不是隐藏思维链。
+OpenAI Route 与 Codex Bridge 路径都执行 JSON Schema 约束和运行时校验。页面展示的是可审阅的方案和模型决策摘要，不是隐藏思维链。
 
 ## 5. 数据与版本设计
 
@@ -115,14 +120,14 @@ D1 主要保存五类数据：
 | 状态 | 内容 |
 | --- | --- |
 | 已完成 | 方案生成与调整、Web App 生成、Preview、代码查看、导出、版本演进与恢复、持续对话、长期记忆、项目管理、GitHub 登录、D1 持久化和 Cloudflare 部署 |
-| 有明确限制 | 当前线上 Worker 未配置 OpenAI API Key；后台任务只在浏览器会话内继续，刷新或关闭页面会中断；Preview 是 iframe 隔离，不是生产级代码沙箱 |
+| 有明确限制 | Remote Codex 演示依赖 Mac 和临时 Tunnel 在线；后台任务只在浏览器会话内继续，刷新或关闭页面会中断；Preview 是 iframe 隔离，不是生产级代码沙箱 |
 | 本版不做 | 多文件工程、生成后端、生成应用业务数据持久化、GitHub 仓库同步、自动 RAG、团队协作和计费 |
 
 平台保存的是项目需求、方案、代码和版本，不保存用户在生成应用中的游戏分数、棋盘状态或其他运行数据。
 
 ## 7. 工程质量与交付
 
-- 53 项自动测试，覆盖 OAuth、数据序列化、领域契约、模型路由、标题摘要、导出和页面静态约束；
+- 60 项自动测试，覆盖 OAuth、数据序列化、领域契约、模型路由、Bridge 鉴权与 E2EE、标题摘要、导出和页面静态约束；
 - Worker HTTP smoke 覆盖项目 CRUD、版本创建与恢复、对话和 workspace 隔离；
 - CI 执行 ESLint、TypeScript、自动测试和 Cloudflare Worker build；
 - D1 Schema 使用 migration 管理；
@@ -136,7 +141,7 @@ D1 主要保存五类数据：
 
 | 优先级 | 业务模块 | 配套工程能力 | 判断依据 |
 | --- | --- | --- | --- |
-| P0 | 应用一键发布、公开访问链接、版本发布与下线 | 配置线上模型、生产 smoke、发布状态和基础监控 | 先补齐“创建—发布—使用”的交付闭环 |
+| P0 | 应用一键发布、公开访问链接、版本发布与下线 | 配置正式线上 API Key、生产 smoke、发布状态和基础监控 | 用稳定 Provider 取代面试用临时 Tunnel，并补齐“创建—发布—使用”闭环 |
 | P1 | 模板中心、示例应用、Prompt 引导 | 模板数据结构、模板版本和主链路 E2E | 降低首次使用门槛，提高创建成功率 |
 | P1 | 为生成应用提供可选的数据保存、表单提交和轻量 API | 受控数据协议、权限隔离和持久任务 | 让生成结果从展示 Demo 变成可长期使用的应用 |
 | P2 | 项目复制、分享编辑、GitHub 导出和版本 Diff | 幂等操作、乐观锁、异步任务和版本差异计算 | 提高成果复用和流转效率 |
@@ -153,6 +158,7 @@ D1 主要保存五类数据：
 | [`app/api/plan/route.ts`](app/api/plan/route.ts) | BuildPlan Structured Output |
 | [`app/api/generate/route.ts`](app/api/generate/route.ts) | WebAppArtifact 生成 |
 | [`app/api/chat/route.ts`](app/api/chat/route.ts) | 对话历史与长期记忆 |
+| [`lib/remote-codex.ts`](lib/remote-codex.ts) | Worker 到远程 Codex Bridge 的配置、Bearer/E2EE 请求与超时 |
 | [`app/api/projects`](app/api/projects) | 项目、版本和消息 API |
 | [`db/schema.ts`](db/schema.ts) | D1 数据模型 |
 | [`scripts/codex-session-bridge.mjs`](scripts/codex-session-bridge.mjs) | 本机 Codex Provider |

@@ -37,6 +37,8 @@
 >
 > 技术上这是一个 Next.js 单仓全栈应用。React 负责工作台，Next.js Route Handlers 是后端，部署后运行在 Cloudflare Worker，D1 保存用户、项目、版本和对话。Cloudflare 在这里主要提供运行环境、静态托管和数据库，业务框架仍然是 Next.js。
 >
+> 模型 Provider 按 API Key、远程 Mac Bridge、浏览器本机 Bridge 排优先级。Remote Bridge 通用模式支持 HTTPS + Bearer；本次 localhost.run 临时链路额外启用 E2EE，Worker 和 Mac 用共享 Token 派生 AES-256-GCM 密钥，因此能复用 ChatGPT/Codex 订阅，又不会让 Token、Prompt 和回复以明文经过 Tunnel。
+>
 > Web App 模式没有让模型直接吐代码，而是拆成 Plan 和 Generate 两阶段。模型先返回严格结构化的 BuildPlan，用户可以继续调整，确认后再生成一个自包含的 index.html。这个文件直接在 sandbox iframe 中运行，也进入版本快照和 ZIP 导出。每次修改都会创建新版本，恢复历史版本也会创建新的最新版本，不覆盖历史。
 >
 > 对话模式保存消息历史和用户显式配置的长期记忆。为了避免用户等待模型时被锁在一个页面里，我把任务状态按项目隔离：当前浏览器内，不同对话可以后台运行，Chat 和 Web 构建可以同时进行；请求 ID、workspace epoch 和 project ID 用来阻止慢响应写错项目。
@@ -196,18 +198,26 @@ GitHub 登录只负责身份与项目归属，不等于 GitHub 仓库同步。
 
 ### 6.2 没有线上 API Key 时
 
-演示前在本机执行：
+本次面试使用一条临时服务端链路：
+
+~~~text
+线上 Worker → localhost.run HTTPS Tunnel → E2EE Mac Codex Bridge → 已登录的 Codex CLI
+~~~
+
+通用模式支持 HTTPS + Bearer。本次因公司安全软件拦截 <code>cloudflared</code>，经用户授权改用 localhost.run，并强制设置 <code>REMOTE_CODEX_BRIDGE_E2EE=1</code>。演示前执行：
 
 ~~~bash
 codex login status
-npm run model:bridge
+CODEX_BRIDGE_PORT=4317 CODEX_BRIDGE_TOKEN="<随机-token>" npm run model:bridge
+# 另一个终端
+ssh -R 80:localhost:4317 nokey@localhost.run
 ~~~
 
-然后可以打开本地页面，也可以从同一台电脑打开线上 Demo。浏览器收到 Worker 的 <code>OPENAI_NOT_CONFIGURED</code> 后，会访问本机 <code>127.0.0.1:4317</code>。
+把 Tunnel URL、同一个 Token 和值为 <code>1</code> 的 <code>REMOTE_CODEX_BRIDGE_E2EE</code> 写入 Worker Secret。Bridge 默认端口是 4317；本次旧进程占用后实际使用 <code>CODEX_BRIDGE_PORT=4318</code>，SSH 命令同步改为 4318。恢复时重新启动 Bridge/Tunnel 并更新临时 URL；面试结束后关闭两个进程并删除三个 Remote Secret。
 
 必须主动说明：
 
-> 本机 Bridge 是当前没有 API Key 时的真实模型验证入口，不是生产后端。Cloudflare 不接收我的 ChatGPT 会话凭证。
+> E2EE 模式用共享 Token 派生 AES-256-GCM 密钥，Token 不进入 Authorization Header，Prompt 和回复只以密文信封经过 Tunnel；连接元数据仍可见，所以它仍是临时演示链路，不是生产安全方案。ChatGPT/Codex 登录凭证始终留在 Mac。
 
 ## 7. 技术实现架构
 
@@ -221,7 +231,8 @@ flowchart TD
     D1["Cloudflare D1"]
     Github["GitHub OAuth"]
     OpenAI["OpenAI Responses API"]
-    Bridge["Local Codex Bridge"]
+    RemoteBridge["Remote Mac Codex Bridge<br/>HTTPS + Bearer / E2EE"]
+    LocalBridge["Browser-local Codex Bridge"]
     Codex["codex exec + local login"]
     Preview["sandbox iframe"]
 
@@ -232,8 +243,10 @@ flowchart TD
     Worker --> D1
     Worker --> Github
     Worker -->|"OPENAI_API_KEY configured"| OpenAI
-    Studio -->|"only on OPENAI_NOT_CONFIGURED"| Bridge
-    Bridge --> Codex
+    Worker -->|"otherwise REMOTE_CODEX_*"| RemoteBridge
+    Studio -->|"only when neither server Provider exists"| LocalBridge
+    RemoteBridge --> Codex
+    LocalBridge --> Codex
     Studio --> Preview
 ~~~
 
@@ -249,7 +262,7 @@ flowchart TD
 | 静态资源 | Cloudflare Assets | 托管浏览器资源 |
 | 数据库 | Cloudflare D1 | 持久化关系数据 |
 | 数据定义 | Drizzle Schema + migration | 管理 Schema 和版本化迁移 |
-| 模型 | OpenAI Responses API / Codex Bridge | 规划、生成与对话 |
+| 模型 | OpenAI Responses API / Remote 或 Local Codex Bridge | 规划、生成与对话 |
 | 产物运行 | sandbox iframe | 隔离运行生成 HTML |
 
 后端在哪里？
@@ -309,7 +322,7 @@ interface WebAppArtifact {
 }
 ~~~
 
-OpenAI Route 与本机 Codex Bridge 分别执行严格 JSON Schema 约束和运行时校验。模型输出不会作为自由文本直接写入数据库或 iframe。
+OpenAI Route 与 Codex Bridge 路径都执行严格 JSON Schema 约束和运行时校验。模型输出不会作为自由文本直接写入数据库或 iframe。
 
 ### 8.3 为什么不展示“真实思维链”
 
@@ -362,23 +375,27 @@ Browser
 → /api/plan | /api/generate | /api/chat
    ├─ OPENAI_API_KEY 存在
    │  └─ OpenAI Responses API
-   └─ 503 + OPENAI_NOT_CONFIGURED
-      └─ Local Codex Bridge
+   ├─ 否则 REMOTE_CODEX_BRIDGE_URL/TOKEN 同时存在
+   │  └─ Worker → HTTPS + Bearer，或 E2EE → Remote Mac Codex Bridge
+   └─ 否则返回 503 + OPENAI_NOT_CONFIGURED
+      └─ Browser → localhost Codex Bridge
 ~~~
 
 关键规则：
 
 1. 始终优先请求同源服务端；
 2. Worker 配置 Key 时，服务端优先调用 OpenAI；
-3. 只有“没有配置 Key”才回退本机 Bridge；
-4. Key 已配置但调用失败时，不静默切换 Provider；
-5. Bridge 只监听 localhost，不把本机登录信息上传 Cloudflare；
-6. Bridge 使用串行队列执行 Codex CLI，避免并发子进程争抢本机会话。
+3. 没有 Key 时，完整的 Remote Bridge URL + Token 配置优先于浏览器回退；
+4. 只有两种服务端 Provider 都未配置，才返回可触发 localhost Bridge 的 <code>OPENAI_NOT_CONFIGURED</code>；
+5. 已选中的 OpenAI 或 Remote Bridge 调用失败时，不静默切换 Provider；
+6. 通用模式使用 HTTPS + Bearer；<code>REMOTE_CODEX_BRIDGE_E2EE=1</code> 时用共享 Token 派生 AES-256-GCM 密钥，Token 和业务载荷不以明文经过 Tunnel；
+7. E2EE 仍暴露连接元数据，不能包装成生产级安全能力；ChatGPT/Codex 登录信息始终不离开 Mac；
+8. Codex Bridge 使用串行队列执行 CLI，避免并发子进程争抢本机会话。
 
 不同 Provider 下的“并发”含义不同：
 
 - 服务端 OpenAI：不同请求可以真正并行；
-- 本机 Codex Bridge：UI 可以同时发起和切换，但模型任务在本机依次完成。
+- Remote / Local Codex Bridge：UI 可以同时发起和切换，但 Mac 上的模型任务依次完成。
 
 ## 11. 页面状态与并发策略
 
@@ -499,7 +516,7 @@ ready → replying → ready / reply_error
 | 长期记忆 | 用户显式文本 | 可见、可控、可验证 | 自动画像、Embedding 和 RAG |
 | 前后端组织 | Next.js 单仓全栈 | 共用类型、同源 API、一套部署 | 微服务和独立 API 网关 |
 | 数据库 | D1 | 与 Worker 绑定、无需数据库服务 | 高并发写入与复杂事务平台 |
-| 无 API Key 怎么验证 | 服务端 Key 优先，本机 Bridge 兜底 | 保留生产路径且能使用现有订阅 | 上传个人会话凭证 |
+| 无 API Key 怎么验证 | Remote Mac Bridge，浏览器 localhost Bridge 再兜底 | 保留生产路径且能使用现有订阅 | 上传个人会话凭证 |
 | 安全做到什么程度 | OAuth、Session hash、校验、sandbox 等基础边界 | 满足 Demo 基本质量 | 完整生产安全体系 |
 
 ## 14. 当前完成程度
@@ -517,15 +534,15 @@ ready → replying → ready / reply_error
 - 自动标题、手动改名和删除；
 - 访客 workspace、GitHub OAuth 和访客项目认领；
 - D1 持久化用户、Session、项目、版本、消息和记忆；
-- 服务端 OpenAI Provider 和本机 Codex Bridge；
+- 服务端 OpenAI Provider、Remote Mac Bridge 和浏览器 localhost Bridge；
 - OpenNext + Cloudflare Worker + D1 部署；
-- public GitHub、migration、CI 和 53 项自动测试。
+- public GitHub、migration、CI 和 60 项自动测试。
 
 ### 14.2 部分完成
 
 | 能力 | 已有部分 | 尚缺部分 |
 | --- | --- | --- |
-| 线上真实模型 | 三条 OpenAI 路由已实现 | 当前 Worker 未配置 API Key，外部评审者不能独立新生成 |
+| 线上真实模型 | OpenAI 与 Remote Codex 两条服务端路径均已实现 | Remote 路径依赖 Mac 与临时 Tunnel 在线，尚未配置稳定 API Key |
 | 后台任务 | SPA 内可切项目，结果归属原项目 | 不是服务端持久队列，刷新或关闭页面会中断 |
 | 失败恢复 | 项目壳、Prompt、用户消息和已完成版本持久化 | 未完成 Plan/Artifact 和运行中队列不持久化 |
 | 模型验收 | Schema、类型、长度和字段校验 | acceptance criteria 未自动执行 |
@@ -585,13 +602,17 @@ iframe 没有同源权限，可以降低风险，但当前没有：
 
 Artifact 可以通过字段、大小和类型校验，但不代表键盘操作、游戏规则和所有 acceptance criteria 一定正确。
 
+### 15.6 Remote Codex 是临时演示链路
+
+本次 localhost.run URL 是临时地址，且生成能力依赖 Mac 在线。恢复演示时需重新启动 Bridge/SSH Tunnel 并更新 <code>REMOTE_CODEX_BRIDGE_URL</code>；面试结束后关闭两个进程并删除 <code>REMOTE_CODEX_BRIDGE_URL</code>、<code>REMOTE_CODEX_BRIDGE_TOKEN</code> 和 <code>REMOTE_CODEX_BRIDGE_E2EE</code>。正式环境应改用 API Key 或受控的稳定服务。
+
 ## 16. 如果继续投入时间
 
 优先级不按功能大小排序，而按“是否补齐可验证短板、是否提高主链路稳定性、投入产出比”排序。
 
 | 优先级 | 时间 | 下一步 | 判断依据 |
 | --- | --- | --- | --- |
-| P0 | 0.5 天 | 配置线上 API Key；增加 Provider 健康检查和准确状态；跑一次生产模型 smoke；录制 3–5 分钟 Demo | 先消除外部评审者无法独立生成的最大交付风险 |
+| P0 | 0.5 天 | 配置稳定线上 API Key；增加 Provider 健康检查和准确状态；跑一次生产模型 smoke；录制 3–5 分钟 Demo | 用正式 Provider 取代依赖 Mac 的临时 Tunnel |
 | P1 | 1–2 天 | Playwright 主链路 E2E；服务端 operation ID 和幂等；持久任务表或 Queue；trace ID、阶段耗时和结构化错误 | 直接提升稳定性、可诊断性和长任务恢复 |
 | P2 | 2–4 天 | 自动执行 acceptance criteria；捕获 Preview 运行错误；最多一次受控自修复；Plan/代码版本 Diff | 把“生成完成”升级为“生成并验证完成”，形成 Agent 工程亮点 |
 | P2 | 1–2 天 | 拆分 Studio.tsx；用 reducer/状态机管理 Web 和 Chat；抽象统一 Provider adapter | 降低组件复杂度，提高扩展与测试能力 |
@@ -606,11 +627,11 @@ Artifact 可以通过字段、大小和类型校验，但不代表键盘操作�
 
 | 维度 | 当前优势 | 当前短板 | 最值得优化 |
 | --- | --- | --- | --- |
-| 完成度 | 两条闭环、登录、持久化、版本、删除、导出和部署 | 线上 Key 缺失，任务不持久 | 配置线上 Provider，增加持久任务和 E2E |
+| 完成度 | 两条闭环、登录、持久化、版本、删除、导出和部署 | Remote Provider 依赖 Mac，任务不持久 | 配置稳定线上 Provider，增加持久任务和 E2E |
 | 工程思维 | 先定义契约；版本、Provider、数据边界清楚 | Studio 组件过大，状态由多个布尔组合 | 拆分模块并引入 reducer/状态机 |
 | 用户体验 | 访客直接开始；方案可调整；可后台切项目 | 长等待缺少流式进度和服务端取消 | 阶段流式反馈、取消、重试和准确 Provider 状态 |
 | 创新性 | Plan-first、不可变演进、显式记忆 | 验收标准尚未执行，版本无 Diff | 自动验收 + 一次有界修复 + 版本 Diff |
-| 可交付性 | 在线地址、public 仓库、D1、CI、测试和文档 | 新模型调用依赖本机 Bridge | 配置 Key、Demo 视频、部署后 smoke 证据 |
+| 可交付性 | 在线地址、public 仓库、D1、CI、测试和文档 | 面试 Provider 依赖 Mac 与 Tunnel | 配置 Key、Demo 视频、部署后 smoke 证据 |
 
 ## 18. 面试官可能追问
 
@@ -648,11 +669,11 @@ Demo 数据规模下，完整快照用存储空间换查询稳定性和可解释
 
 ### Q9：Chat 可以并发吗？
 
-在当前浏览器内，不同对话可以独立发起任务，同一个对话不可以。后一条消息依赖上一条回复，必须保持顺序；多标签页和多设备暂时没有服务端锁。本机 Codex Bridge 还会把所有本地模型任务串行排队。
+在当前浏览器内，不同对话可以独立发起任务，同一个对话不可以。后一条消息依赖上一条回复，必须保持顺序；多标签页和多设备暂时没有服务端锁。Remote / Local Codex Bridge 还会把 Mac 上的模型任务串行排队。
 
 ### Q10：为什么没有把 ChatGPT 会话凭证传到 Cloudflare？
 
-个人会话凭证不应该作为线上服务认证。Bridge 只在 localhost 使用已有 Codex 登录；生产方案仍然是 Worker 持有服务端 API Key。
+个人会话凭证不应该作为线上服务认证。Bridge 只在 Mac 上使用已有 Codex 登录；Worker 持有的是可撤销的独立共享 Token，不等于 ChatGPT 会话凭证。本次 E2EE 模式也不把 Token 放进 Authorization Header；长期生产方案仍然是 Worker 持有服务端 API Key。
 
 ### Q11：生成应用安全吗？
 
@@ -675,6 +696,7 @@ Demo 数据规模下，完整快照用存储空间换查询稳定性和可解释
 | [lib/validation.ts](lib/validation.ts) | 领域对象运行时校验 |
 | [lib/project-title.ts](lib/project-title.ts) | 可测试的首次标题摘要 |
 | [lib/export-project.ts](lib/export-project.ts) | 独立 ZIP 导出 |
+| [lib/remote-codex.ts](lib/remote-codex.ts) | Remote Bridge 配置、Bearer/E2EE 请求、超时与错误边界 |
 | [db/schema.ts](db/schema.ts) | D1 数据模型 |
 | [db/auth.ts](db/auth.ts) | workspace 身份和 Session 解析 |
 | [scripts/codex-session-bridge.mjs](scripts/codex-session-bridge.mjs) | 本机 Codex Provider 和串行队列 |
@@ -691,7 +713,7 @@ Demo 数据规模下，完整快照用存储空间换查询稳定性和可解释
 4. 用不可变版本让自然语言修改可追溯；
 5. 用项目级状态隔离解决慢模型请求下的页面切换与并发；
 6. 明确区分平台持久化、生成应用运行时状态和模型 Provider；
-7. 保留线上 API Key 生产路径，同时用 localhost Bridge 完成真实模型验证；
+7. 保留线上 API Key 生产路径，同时用 Bearer/E2EE Remote Bridge 和 localhost Bridge 完成真实模型验证；
 8. 对尚未完成的任务持久化、自动验收和生产安全保持诚实边界。
 
 面试时的核心表达应该是：

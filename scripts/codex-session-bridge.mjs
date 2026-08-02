@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash, timingSafeEqual, webcrypto } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -6,9 +7,24 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HOST = "127.0.0.1";
-const PORT = 4317;
+const PORT = Number.parseInt(process.env.CODEX_BRIDGE_PORT ?? "4317", 10);
 const PROVIDER = "codex_session";
 const MODEL = "Codex subscription";
+const BRIDGE_TOKEN = process.env.CODEX_BRIDGE_TOKEN?.trim() || null;
+const BRIDGE_TOKEN_DIGEST = BRIDGE_TOKEN ? tokenDigest(BRIDGE_TOKEN) : null;
+const BRIDGE_ENCRYPTION_KEY = BRIDGE_TOKEN_DIGEST
+  ? webcrypto.subtle.importKey(
+      "raw",
+      BRIDGE_TOKEN_DIGEST,
+      { name: "AES-GCM" },
+      false,
+      ["encrypt", "decrypt"],
+    )
+  : null;
+const E2EE_MAX_CLOCK_SKEW_MS = 120_000;
+const E2EE_CONTEXT = "chance-atoms-bridge:v1";
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 const TIMEOUT_MS = 120_000;
 const MAX_REQUEST_BYTES = 512_000;
 const MAX_INPUT_CHARS = 12_000;
@@ -53,6 +69,109 @@ const PRODUCTION_ORIGIN = "https://chance-atoms-demo.chanceflying1.workers.dev";
 
 let activeChild = null;
 let modelQueue = Promise.resolve();
+const seenE2EENonces = new Map();
+
+function tokenDigest(value) {
+  return createHash("sha256").update(value, "utf8").digest();
+}
+
+function hasValidAuthorization(request) {
+  if (!BRIDGE_TOKEN_DIGEST) return true;
+
+  const authorization = request.headers.authorization;
+  if (typeof authorization !== "string") return false;
+
+  const match = /^Bearer[\t ]+([^\s]+)$/i.exec(authorization);
+  if (!match) return false;
+
+  return timingSafeEqual(tokenDigest(match[1]), BRIDGE_TOKEN_DIGEST);
+}
+
+function e2eeAad(direction, endpoint, ts) {
+  return textEncoder.encode(`${E2EE_CONTEXT}:${direction}:${endpoint}:${ts}`);
+}
+
+function decodeBase64Url(value) {
+  if (typeof value !== "string" || !value || !/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw new Error("Invalid base64url");
+  }
+  const decoded = Buffer.from(value, "base64url");
+  if (decoded.toString("base64url") !== value) throw new Error("Invalid base64url");
+  return decoded;
+}
+
+function validateE2EEEnvelope(value) {
+  return (
+    isRecord(value) &&
+    value.v === 1 &&
+    Number.isSafeInteger(value.ts) &&
+    typeof value.nonce === "string" &&
+    typeof value.ciphertext === "string"
+  );
+}
+
+function rememberE2EENonce(nonce) {
+  const now = Date.now();
+  for (const [value, expiresAt] of seenE2EENonces) {
+    if (expiresAt <= now) seenE2EENonces.delete(value);
+  }
+  if (seenE2EENonces.has(nonce)) throw new Error("Replayed nonce");
+  if (seenE2EENonces.size >= 4_096) {
+    seenE2EENonces.delete(seenE2EENonces.keys().next().value);
+  }
+  seenE2EENonces.set(nonce, now + E2EE_MAX_CLOCK_SKEW_MS);
+}
+
+async function decryptE2EERequest(envelope, endpoint) {
+  if (!BRIDGE_ENCRYPTION_KEY || !validateE2EEEnvelope(envelope)) {
+    throw new HttpError(401, "加密请求无效。");
+  }
+  if (Math.abs(Date.now() - envelope.ts) > E2EE_MAX_CLOCK_SKEW_MS) {
+    throw new HttpError(401, "加密请求无效。");
+  }
+
+  try {
+    const nonce = decodeBase64Url(envelope.nonce);
+    if (nonce.byteLength !== 12) throw new Error("Invalid nonce length");
+    const ciphertext = decodeBase64Url(envelope.ciphertext);
+    if (ciphertext.byteLength < 16) throw new Error("Invalid ciphertext");
+    const plaintext = await webcrypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: nonce,
+        additionalData: e2eeAad("request", endpoint, envelope.ts),
+      },
+      await BRIDGE_ENCRYPTION_KEY,
+      ciphertext,
+    );
+    const payload = JSON.parse(textDecoder.decode(plaintext));
+    rememberE2EENonce(envelope.nonce);
+    return payload;
+  } catch {
+    throw new HttpError(401, "加密请求无效。");
+  }
+}
+
+async function encryptE2EEResponse(payload, endpoint) {
+  if (!BRIDGE_ENCRYPTION_KEY) throw new HttpError(500, "加密响应失败。");
+  const ts = Date.now();
+  const nonce = webcrypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await webcrypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv: nonce,
+      additionalData: e2eeAad("response", endpoint, ts),
+    },
+    await BRIDGE_ENCRYPTION_KEY,
+    textEncoder.encode(JSON.stringify(payload)),
+  );
+  return {
+    v: 1,
+    ts,
+    nonce: Buffer.from(nonce).toString("base64url"),
+    ciphertext: Buffer.from(ciphertext).toString("base64url"),
+  };
+}
 
 function enqueueModelRequest(task) {
   const result = modelQueue.then(task, task);
@@ -96,7 +215,8 @@ function corsHeaders(request) {
   const origin = request.headers.origin;
   const headers = {
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers":
+      "Authorization, Content-Type, X-Chance-Atoms-E2EE",
     "Access-Control-Max-Age": "600",
     Vary: "Origin, Access-Control-Request-Private-Network",
   };
@@ -622,6 +742,8 @@ function childEnvironment() {
   delete environment.OPENAI_API_KEY;
   delete environment.CODEX_API_KEY;
   delete environment.CODEX_ACCESS_TOKEN;
+  delete environment.CODEX_BRIDGE_TOKEN;
+  delete environment.CODEX_BRIDGE_PORT;
 
   return environment;
 }
@@ -785,6 +907,13 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  const endpoint = isPlanRequest ? "plan" : isChatRequest ? "chat" : "generate";
+  const usesE2EE = request.headers["x-chance-atoms-e2ee"] === "1";
+  if ((!usesE2EE && !hasValidAuthorization(request)) || (usesE2EE && !BRIDGE_TOKEN)) {
+    sendJson(response, 401, { error: "未授权。" }, headers);
+    return;
+  }
+
   const abortController = new AbortController();
   const abort = () => abortController.abort();
   request.once("aborted", abort);
@@ -793,7 +922,10 @@ const server = createServer(async (request, response) => {
   });
 
   try {
-    const body = await readJson(request);
+    const wireBody = await readJson(request);
+    const body = usesE2EE
+      ? await decryptE2EERequest(wireBody, endpoint)
+      : wireBody;
     const input = isPlanRequest
       ? parsePlanRequest(body)
       : isChatRequest
@@ -829,17 +961,16 @@ const server = createServer(async (request, response) => {
         : isChatRequest
           ? { ...result, provider: PROVIDER, model: MODEL }
         : { artifact: result, provider: PROVIDER, model: MODEL };
-      sendJson(
-        response,
-        200,
-        payload,
-        headers,
-      );
+      const responseBody = usesE2EE
+        ? await encryptE2EEResponse(payload, endpoint)
+        : payload;
+      sendJson(response, 200, responseBody, headers);
     }
   } catch (error) {
     if (response.destroyed) return;
     const status = error instanceof HttpError ? error.status : 500;
     const message = error instanceof Error ? error.message : "本地 Codex 桥接执行失败。";
+    console.error(`Bridge ${endpoint} failed (${status}): ${message}`);
     if (status >= 500 && !(error instanceof HttpError)) console.error(error);
     sendJson(response, status, { error: message }, headers);
   }

@@ -50,11 +50,12 @@ Chance Atoms 统一管理两类项目。
 
 ## 当前演示边界
 
-当前线上 Worker 已配置 GitHub OAuth，但尚未配置 <code>OPENAI_API_KEY</code>。因此：
+当前线上 Worker 已配置 GitHub OAuth。模型入口按以下顺序选择：
 
 - 在线页面、登录、项目、历史版本、对话历史和长期记忆可以直接访问；
-- 新的模型规划、生成和对话，需要在访问页面的同一台电脑上启动本机 Codex Bridge；
-- 获得 OpenAI API Key 后，只需配置 Worker Secret，不需要修改前端调用路径。
+- 配置 <code>OPENAI_API_KEY</code> 时，Worker 直接调用 OpenAI；
+- 没有 API Key、但配置了 <code>REMOTE_CODEX_BRIDGE_URL/TOKEN</code> 时，Worker 通过 HTTPS Tunnel 调用 Mac Codex Bridge；默认使用 Bearer，本次 localhost.run 演示额外启用 E2EE；
+- 两种服务端 Provider 都没有配置时，浏览器才回退同一台电脑上的 localhost Bridge。
 
 当前生成范围是自包含前端 Web App，不包含：
 
@@ -78,7 +79,8 @@ flowchart LR
     W["Cloudflare Worker<br/>OpenNext + Next.js Route Handlers"]
     D["Cloudflare D1"]
     O["OpenAI Responses API"]
-    C["Local Codex Bridge"]
+    R["Remote Mac Codex Bridge<br/>HTTPS + Bearer / E2EE"]
+    L["Browser-local Codex Bridge"]
     X["codex exec"]
     I["sandbox iframe"]
 
@@ -87,8 +89,10 @@ flowchart LR
     E --> W
     W --> D
     W -->|"OPENAI_API_KEY configured"| O
-    B -->|"only on OPENAI_NOT_CONFIGURED"| C
-    C --> X
+    W -->|"otherwise REMOTE_CODEX_*"| R
+    B -->|"only when neither server Provider exists"| L
+    R --> X
+    L --> X
     B --> I
 ~~~
 
@@ -99,7 +103,7 @@ flowchart LR
 | 部署适配 | OpenNext for Cloudflare | 把标准 Next.js 构建转换为 Worker 包 |
 | 在线运行 | Cloudflare Worker + Assets | 运行服务端逻辑并托管静态资源 |
 | 数据 | Cloudflare D1 + Drizzle migrations | 用户、Session、项目、版本、消息和记忆 |
-| 模型 | OpenAI Responses API / 本机 Codex Bridge | 规划、生成和对话 |
+| 模型 | OpenAI Responses API / 远程或本机 Codex Bridge | 规划、生成和对话 |
 | 产物运行 | sandbox iframe | 隔离运行模型生成的单文件 Web App |
 
 一句话解释 Cloudflare：
@@ -143,9 +147,47 @@ OPENAI_MODEL=gpt-5.6-terra
 
 规划、生成和对话会通过同源的 <code>/api/plan</code>、<code>/api/generate</code> 和 <code>/api/chat</code> 调用 OpenAI Responses API。
 
-### 方式 B：本机 Codex Bridge
+### 方式 B：线上 Worker 访问 Mac Codex Bridge
 
-没有 API Key 时，可以复用本机已有的 ChatGPT/Codex 登录：
+没有 API Key 时，可让线上 Worker 通过 HTTPS Tunnel 调用 Mac 上已登录的 Codex CLI。通用模式是 HTTPS + Bearer；本次因公司安全软件拦截 <code>cloudflared</code>，经用户授权改用 localhost.run，并强制设置 <code>REMOTE_CODEX_BRIDGE_E2EE=1</code>。这只是临时演示链路，不是生产安全方案。
+
+1. 在 Mac 生成随机 Token，确认 Codex 登录，然后启动 Bridge：
+
+~~~bash
+openssl rand -hex 32
+codex login status
+CODEX_BRIDGE_PORT=4317 CODEX_BRIDGE_TOKEN="<上一步生成的-token>" npm run model:bridge
+~~~
+
+Bridge 默认端口是 <code>4317</code>；本次面试因旧进程占用该端口，实际使用 <code>CODEX_BRIDGE_PORT=4318</code>。Tunnel 命令中的本地端口必须保持一致。
+
+2. 在另一个终端启动 localhost.run，并记录输出的临时 HTTPS URL：
+
+~~~bash
+ssh -R 80:localhost:4317 nokey@localhost.run
+~~~
+
+3. 把 Tunnel 地址、同一个 Token 和 E2EE 开关配置为 Worker Secret：
+
+~~~bash
+npx wrangler secret put REMOTE_CODEX_BRIDGE_URL
+npx wrangler secret put REMOTE_CODEX_BRIDGE_TOKEN
+npx wrangler secret put REMOTE_CODEX_BRIDGE_E2EE  # 输入 1
+~~~
+
+E2EE 模式下，Worker 与 Bridge 用共享 Token 派生 AES-256-GCM 密钥；Token 不放入 Authorization Header，Prompt 和回复以密文信封经过 Tunnel。Tunnel 仍能看到连接元数据，因此这不能替代正式的网络隔离、密钥管理和安全评审。
+
+临时 Tunnel 重启后 URL 可能变化。恢复演示时重新启动 Bridge/SSH Tunnel，并更新 <code>REMOTE_CODEX_BRIDGE_URL</code>；Token 轮换时同步更新两端，无需重新部署代码。面试结束后按 <code>Ctrl+C</code> 关闭 Bridge 和 SSH Tunnel，并删除临时 Worker Secret：
+
+~~~bash
+npx wrangler secret delete REMOTE_CODEX_BRIDGE_URL
+npx wrangler secret delete REMOTE_CODEX_BRIDGE_TOKEN
+npx wrangler secret delete REMOTE_CODEX_BRIDGE_E2EE
+~~~
+
+### 方式 C：浏览器本机 Codex Bridge
+
+服务端既没有 API Key，也没有 Remote Bridge 配置时，可以在访问页面的同一台电脑上复用已有 ChatGPT/Codex 登录：
 
 ~~~bash
 codex login status
@@ -161,9 +203,11 @@ Bridge 默认监听 <code>127.0.0.1:4317</code>，提供：
 | POST | <code>/generate</code> | 生成 WebAppArtifact |
 | POST | <code>/chat</code> | 生成对话回复 |
 
-浏览器始终先请求同源服务端。只有服务端明确返回 <code>503 + OPENAI_NOT_CONFIGURED</code>，前端才访问本机 Bridge；如果服务端已经配置 Key 但调用失败，不会静默切换 Provider。
+浏览器始终先请求同源服务端。只有服务端明确返回 <code>503 + OPENAI_NOT_CONFIGURED</code>，前端才访问 localhost Bridge；已经选中的 OpenAI 或 Remote Bridge 调用失败时，不会静默切换 Provider。
 
 本机 Bridge 使用串行队列执行 Codex CLI 任务。UI 可以切换项目或发起不同任务，但本机模型会依次完成。
+
+明确优先级：<code>OPENAI_API_KEY</code> &gt; <code>REMOTE_CODEX_BRIDGE_URL/TOKEN</code> &gt; 浏览器 localhost Bridge。若要验证 Remote Bridge，请不要同时配置 <code>OPENAI_API_KEY</code>。
 
 ## 配置 GitHub 登录
 
@@ -228,6 +272,8 @@ npx wrangler secret put OPENAI_API_KEY
 
 <code>OPENAI_MODEL</code> 可选；未配置时使用代码中的默认模型。如需覆盖，再执行 <code>npx wrangler secret put OPENAI_MODEL</code>。
 
+没有 API Key 时，也可按“[方式 B](#方式-b线上-worker-访问-mac-codex-bridge)”配置临时 Remote Codex Bridge。
+
 构建并部署：
 
 ~~~bash
@@ -268,7 +314,7 @@ npm run deploy
 | <code>npm run db:migrate:remote</code> | 应用线上 D1 migration |
 | <code>npm run lint</code> | ESLint 检查 |
 | <code>npm exec tsc -- --noEmit</code> | TypeScript 检查 |
-| <code>npm test</code> | 运行 53 项自动测试 |
+| <code>npm test</code> | 运行 60 项自动测试 |
 | <code>npm run build</code> | 构建标准 Next.js 应用 |
 | <code>npm run build:worker</code> | 构建 Cloudflare Worker bundle |
 | <code>npm run preview</code> | 本地预览 Worker bundle |
@@ -282,7 +328,7 @@ npm run deploy
 - GitHub OAuth state、PKCE、Session hash 和访客项目认领；
 - D1 项目、版本、对话和长期记忆序列化；
 - BuildPlan 与 WebAppArtifact 运行时契约；
-- 模型路由、输入边界和本机 Bridge 回退条件；
+- 模型路由、Provider 优先级、远程 Bridge Bearer/E2EE 和本机 Bridge 回退条件；
 - 项目标题摘要与手动改名相关静态约束；
 - 版本锁定/恢复交互的静态约束、导出和生成 HTML 安全编码；
 - Next.js 页面渲染、路由和 OpenNext 配置。

@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 import { summarizeInitialProjectTitle } from "@/lib/project-title";
+import {
+  getRemoteCodexConfig,
+  remoteCodexModel,
+  requestRemoteCodex,
+} from "@/lib/remote-codex";
 
 const MAX_MESSAGE_LENGTH = 12_000;
 const MAX_MEMORY_LENGTH = 12_000;
@@ -99,7 +104,19 @@ export async function POST(request: Request) {
 
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   const model = process.env.OPENAI_MODEL?.trim() || DEFAULT_MODEL;
+  let remoteConfig: ReturnType<typeof getRemoteCodexConfig> = null;
   if (!apiKey) {
+    try {
+      remoteConfig = getRemoteCodexConfig();
+    } catch (error) {
+      console.error("Remote Codex configuration is invalid", error);
+      return NextResponse.json(
+        { error: "远程 Codex 配置无效，请检查服务端环境变量。" },
+        { status: 502 },
+      );
+    }
+  }
+  if (!apiKey && !remoteConfig) {
     return NextResponse.json(
       {
         error:
@@ -108,6 +125,38 @@ export async function POST(request: Request) {
         provider: "unavailable",
       },
       { status: 503 },
+    );
+  }
+
+  if (!apiKey && remoteConfig) {
+    try {
+      const payload = await requestRemoteCodex(
+        remoteConfig,
+        "chat",
+        { message, history, memory },
+        130_000,
+      );
+      const firstUserMessage =
+        history.find((item) => item.role === "user")?.content ?? message;
+      const result = parseChatResult(payload, firstUserMessage);
+      return NextResponse.json({
+        ...result,
+        provider: "remote_codex",
+        model: remoteCodexModel(payload),
+      });
+    } catch (error) {
+      console.error("Remote Codex chat failed", error);
+      return NextResponse.json(
+        { error: "远程 Codex 回复失败，请稍后重试。" },
+        { status: 502 },
+      );
+    }
+  }
+
+  if (!apiKey) {
+    return NextResponse.json(
+      { error: "模型服务配置无效。" },
+      { status: 502 },
     );
   }
 
