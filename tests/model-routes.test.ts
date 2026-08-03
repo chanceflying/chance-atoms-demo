@@ -371,6 +371,26 @@ test("chat route uses the remote Codex bridge and preserves title normalization"
   );
 });
 
+test("chat route marks remote bridge failures as transient", async () => {
+  await withMockRemote(
+    { error: "tunnel unavailable" },
+    async () => {
+      const response = await chat(
+        jsonRequest("http://localhost/api/chat", {
+          message: "继续",
+          history: [],
+          memory: "",
+        }),
+      );
+      const body = (await response.json()) as Record<string, unknown>;
+
+      assert.equal(response.status, 502);
+      assert.equal(body.code, "REMOTE_CODEX_TRANSIENT");
+    },
+    503,
+  );
+});
+
 test("chat route rejects malformed history", async () => {
   const badRoleResponse = await chat(
     jsonRequest("http://localhost/api/chat", {

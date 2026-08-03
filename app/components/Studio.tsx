@@ -155,6 +155,7 @@ type Notice = {
 };
 
 const COMPOSER_PLACEHOLDER = "输入消息，Enter 发送，Shift + Enter 换行…";
+const REMOTE_CHAT_RETRY_DELAYS_MS = [4_000, 8_000] as const;
 
 function submitComposerOnEnter(event: KeyboardEvent<HTMLTextAreaElement>) {
   if (
@@ -572,6 +573,25 @@ async function requestJson(url: string, init?: RequestInit): Promise<unknown> {
     throw new ResponseError(message, response.status, code);
   }
   return payload;
+}
+
+async function requestRemoteChatWithRetry(body: unknown): Promise<unknown> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await requestJson("/api/chat", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      const retryDelay = REMOTE_CHAT_RETRY_DELAYS_MS[attempt];
+      const isTransientRemoteFailure =
+        error instanceof ResponseError
+        && error.status === 502
+        && error.code === "REMOTE_CODEX_TRANSIENT";
+      if (!isTransientRemoteFailure || retryDelay === undefined) throw error;
+      await new Promise<void>((resolve) => window.setTimeout(resolve, retryDelay));
+    }
+  }
 }
 
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -2193,10 +2213,7 @@ export default function Studio({
       };
       let result: ChatResponse;
       try {
-        result = parseChatResponse(await requestJson("/api/chat", {
-          method: "POST",
-          body: JSON.stringify(requestBody),
-        }));
+        result = parseChatResponse(await requestRemoteChatWithRetry(requestBody));
       } catch (error) {
         const shouldUseLocalBridge =
           error instanceof ResponseError

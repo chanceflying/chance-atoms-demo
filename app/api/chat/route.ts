@@ -147,7 +147,10 @@ export async function POST(request: Request) {
     } catch (error) {
       console.error("Remote Codex chat failed", error);
       return NextResponse.json(
-        { error: "远程 Codex 回复失败，请稍后重试。" },
+        {
+          error: "远程 Codex 回复失败，请稍后重试。",
+          code: "REMOTE_CODEX_TRANSIENT",
+        },
         { status: 502 },
       );
     }
