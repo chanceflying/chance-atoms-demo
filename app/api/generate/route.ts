@@ -15,6 +15,7 @@ import {
 const MAX_PROMPT_LENGTH = 12_000;
 const MAX_REQUEST_BYTES = 720_000;
 const MAX_GENERATED_HTML_LENGTH = 300_000;
+const REMOTE_GENERATION_TIMEOUT_MS = 200_000;
 const DEFAULT_MODEL = "gpt-5.6-terra";
 
 const webAppArtifactSchema = {
@@ -131,7 +132,7 @@ export async function POST(request: Request) {
         remoteConfig,
         "generate",
         { prompt, instruction, plan, previousArtifact },
-        130_000,
+        REMOTE_GENERATION_TIMEOUT_MS,
       );
       const artifact = parseStoredArtifact(payload.artifact);
       if (!isWebAppArtifact(artifact)) {

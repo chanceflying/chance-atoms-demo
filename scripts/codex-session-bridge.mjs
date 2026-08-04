@@ -25,7 +25,7 @@ const E2EE_MAX_CLOCK_SKEW_MS = 120_000;
 const E2EE_CONTEXT = "chance-atoms-bridge:v1";
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
-const TIMEOUT_MS = 120_000;
+const MODEL_EXECUTION_TIMEOUT_MS = 180_000;
 const MAX_REQUEST_BYTES = 512_000;
 const MAX_INPUT_CHARS = 12_000;
 const MAX_HISTORY_ITEMS = 40;
@@ -796,7 +796,7 @@ async function executeCodex(prompt, signal, { schemaPath, validateOutput }) {
       const timeout = setTimeout(() => {
         timedOut = true;
         terminate();
-      }, TIMEOUT_MS);
+      }, MODEL_EXECUTION_TIMEOUT_MS);
 
       const onAbort = () => {
         aborted = true;
@@ -977,7 +977,7 @@ const server = createServer(async (request, response) => {
 });
 
 server.headersTimeout = 10_000;
-server.requestTimeout = TIMEOUT_MS + 10_000;
+server.requestTimeout = MODEL_EXECUTION_TIMEOUT_MS + 10_000;
 
 function shutDown() {
   if (activeChild && activeChild.exitCode === null) activeChild.kill("SIGTERM");
